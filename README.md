@@ -4,6 +4,61 @@
 
 An autonomous AI coding loop that runs AI assistants (Claude Code, OpenCode, Codex, or Cursor) to work through tasks until everything is complete.
 
+## Installation (Claude Code)
+
+```bash
+# 1. Clone to Claude Code plugins directory
+git clone https://github.com/Venin-Client-Systems/ralphy.git ~/.claude/plugins/ralphy
+chmod +x ~/.claude/plugins/ralphy/ralphy.sh
+
+# 2. Add shell function to your ~/.zshrc (or ~/.bashrc)
+cat >> ~/.zshrc << 'EOF'
+
+# Ralphy - GitHub Issues workflow automation
+ralphy() {
+  local repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+  if [ -z "$repo" ]; then
+    echo "❌ Not in a git repo with GitHub remote"
+    return 1
+  fi
+  if [ -z "$1" ]; then
+    echo "Usage: ralphy <label> [--parallel]"
+    echo "       ralphy ralphy-1"
+    echo "       ralphy ralphy-1 --parallel --max-parallel 3"
+    echo ""
+    echo "Available labels:"
+    gh label list --limit 20
+    return 1
+  fi
+  local label="$1"
+  shift
+  echo "🚀 Ralphy: Processing '$label' issues from $repo"
+  echo "   Engine: Claude Code"
+  ~/.claude/plugins/ralphy/ralphy.sh --claude --github "$repo" --github-label "$label" "$@"
+}
+EOF
+
+# 3. Reload shell
+source ~/.zshrc
+```
+
+### Usage
+
+From any git repo with GitHub issues:
+
+```bash
+ralphy ralphy-1              # Process all issues labeled "ralphy-1"
+ralphy ralphy-1 --parallel   # Run multiple agents in parallel
+```
+
+### Requirements
+
+- [Claude Code CLI](https://github.com/anthropics/claude-code) installed
+- [GitHub CLI](https://cli.github.com/) (`gh`) authenticated
+- `jq` for JSON parsing
+
+---
+
 ## What It Does
 
 1. Reads tasks from a PRD file, YAML file, or GitHub Issues
@@ -15,7 +70,7 @@ An autonomous AI coding loop that runs AI assistants (Claude Code, OpenCode, Cod
 
 ```bash
 # Clone the repo
-git clone https://github.com/michaelshimeles/ralphy.git
+git clone https://github.com/Venin-Client-Systems/ralphy.git
 cd ralphy
 chmod +x ralphy.sh
 
