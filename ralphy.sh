@@ -97,6 +97,17 @@ declare -a CLAIMED_ISSUES=()      # Issues claimed by THIS instance
 AUTO_PARALLEL=true                # Enable smart auto-parallelism
 AUTO_PARALLEL_MAX=2               # Max parallel when auto-detecting safe pairs
 
+# GitHub Project Board integration
+PROJECT_BOARD_NUM=""              # Project board number (e.g., 2)
+PROJECT_BOARD_OWNER=""            # Project board owner (org or user)
+PROJECT_NODE_ID=""                # GraphQL node ID for the project (resolved at runtime)
+PROJECT_STATUS_FIELD_ID=""        # Status field ID
+PROJECT_BATCH_FIELD_ID=""         # Ralphy Batch field ID
+PROJECT_BRANCH_FIELD_ID=""        # Branch text field ID
+declare -A PROJECT_STATUS_OPTIONS # Status option IDs (keyed by name)
+declare -A PROJECT_BATCH_OPTIONS  # Ralphy Batch option IDs (keyed by label prefix)
+declare -A PROJECT_ITEM_CACHE     # Maps issue_number -> project item ID
+
 # ============================================
 # UTILITY FUNCTIONS
 # ============================================
@@ -148,6 +159,289 @@ has_code_changes_between() {
   diff_files=$(echo "$diff_files" | grep -Ev "$skip_regex" | sed '/^$/d' || true)
 
   [[ -n "$diff_files" ]]
+}
+
+# ============================================
+# GITHUB PROJECT BOARD INTEGRATION
+# ============================================
+
+# Initialize project board: resolve IDs for fields and options
+project_board_init() {
+  if [[ -z "$PROJECT_BOARD_NUM" ]] || [[ -z "$PROJECT_BOARD_OWNER" ]]; then
+    log_warn "No project board configured (use --project OWNER/NUM or add to ~/.ralphy/config)"
+    return 0
+  fi
+
+  log_info "Connecting to GitHub Project #${PROJECT_BOARD_NUM}..."
+
+  # Get project node ID and all fields in one query
+  local result
+  result=$(gh api graphql -f query='
+    query($owner: String!, $num: Int!) {
+      organization(login: $owner) {
+        projectV2(number: $num) {
+          id
+          title
+          fields(first: 30) {
+            nodes {
+              ... on ProjectV2Field { id name }
+              ... on ProjectV2SingleSelectField {
+                id name
+                options { id name }
+              }
+              ... on ProjectV2IterationField { id name }
+            }
+          }
+        }
+      }
+    }' -f owner="$PROJECT_BOARD_OWNER" -F num="$PROJECT_BOARD_NUM" 2>/dev/null) || {
+    log_warn "Could not connect to project board (will continue without board updates)"
+    PROJECT_BOARD_NUM=""
+    return 0
+  }
+
+  PROJECT_NODE_ID=$(echo "$result" | jq -r '.data.organization.projectV2.id // empty')
+  if [[ -z "$PROJECT_NODE_ID" ]]; then
+    log_warn "Project board not found (will continue without board updates)"
+    PROJECT_BOARD_NUM=""
+    return 0
+  fi
+
+  local board_title
+  board_title=$(echo "$result" | jq -r '.data.organization.projectV2.title')
+  log_info "Connected to project: ${CYAN}${board_title}${RESET}"
+
+  # Extract field IDs
+  PROJECT_STATUS_FIELD_ID=$(echo "$result" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Status") | .id // empty')
+  PROJECT_BATCH_FIELD_ID=$(echo "$result" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Ralphy Batch") | .id // empty')
+  PROJECT_BRANCH_FIELD_ID=$(echo "$result" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Branch") | .id // empty')
+
+  # Extract status options
+  local status_options
+  status_options=$(echo "$result" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Status") | .options[]? | "\(.name)=\(.id)"')
+  while IFS='=' read -r name id; do
+    [[ -n "$name" ]] && PROJECT_STATUS_OPTIONS["$name"]="$id"
+  done <<< "$status_options"
+
+  # Extract batch options (key by label prefix like "ralphy-0")
+  local batch_options
+  batch_options=$(echo "$result" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Ralphy Batch") | .options[]? | "\(.name)=\(.id)"')
+  while IFS='=' read -r name id; do
+    if [[ -n "$name" ]]; then
+      # Extract prefix like "ralphy-0" from "ralphy-0 (critical)"
+      local prefix="${name%% *}"
+      PROJECT_BATCH_OPTIONS["$prefix"]="$id"
+    fi
+  done <<< "$batch_options"
+
+  log_debug "Project fields: status=${PROJECT_STATUS_FIELD_ID:-none} batch=${PROJECT_BATCH_FIELD_ID:-none} branch=${PROJECT_BRANCH_FIELD_ID:-none}"
+  log_debug "Status options: ${!PROJECT_STATUS_OPTIONS[*]}"
+  log_debug "Batch options: ${!PROJECT_BATCH_OPTIONS[*]}"
+}
+
+# Add an issue to the project board and return the item ID
+# Usage: project_board_add_issue <issue_number>
+project_board_add_issue() {
+  local issue_num="$1"
+  if [[ -z "$PROJECT_NODE_ID" ]]; then return 0; fi
+
+  # Check cache first
+  if [[ -n "${PROJECT_ITEM_CACHE[$issue_num]:-}" ]]; then
+    echo "${PROJECT_ITEM_CACHE[$issue_num]}"
+    return 0
+  fi
+
+  # Get the issue's node ID
+  local issue_node_id
+  issue_node_id=$(gh api graphql -f query='
+    query($owner: String!, $repo: String!, $num: Int!) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $num) { id }
+      }
+    }' -f owner="${GITHUB_REPO%%/*}" -f repo="${GITHUB_REPO##*/}" -F num="$issue_num" \
+    --jq '.data.repository.issue.id' 2>/dev/null) || return 1
+
+  if [[ -z "$issue_node_id" ]]; then return 1; fi
+
+  # Add to project
+  local item_id
+  item_id=$(gh api graphql -f query='
+    mutation($projectId: ID!, $contentId: ID!) {
+      addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+        item { id }
+      }
+    }' -f projectId="$PROJECT_NODE_ID" -f contentId="$issue_node_id" \
+    --jq '.data.addProjectV2ItemById.item.id' 2>/dev/null) || {
+    log_debug "Failed to add issue #$issue_num to project board"
+    return 1
+  }
+
+  if [[ -n "$item_id" ]]; then
+    PROJECT_ITEM_CACHE[$issue_num]="$item_id"
+    log_debug "Added issue #$issue_num to project board (item: ${item_id:0:20}...)"
+    echo "$item_id"
+  fi
+}
+
+# Update a single-select field on a project item
+# Usage: project_board_update_select <item_id> <field_id> <option_id>
+project_board_update_select() {
+  local item_id="$1" field_id="$2" option_id="$3"
+  if [[ -z "$PROJECT_NODE_ID" ]] || [[ -z "$item_id" ]] || [[ -z "$field_id" ]] || [[ -z "$option_id" ]]; then
+    return 0
+  fi
+
+  gh api graphql -f query='
+    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+      updateProjectV2ItemFieldValue(input: {
+        projectId: $projectId
+        itemId: $itemId
+        fieldId: $fieldId
+        value: {singleSelectOptionId: $optionId}
+      }) {
+        projectV2Item { id }
+      }
+    }' -f projectId="$PROJECT_NODE_ID" -f itemId="$item_id" \
+       -f fieldId="$field_id" -f optionId="$option_id" >/dev/null 2>&1 || {
+    log_debug "Failed to update select field on item $item_id"
+    return 1
+  }
+}
+
+# Update a text field on a project item
+# Usage: project_board_update_text <item_id> <field_id> <value>
+project_board_update_text() {
+  local item_id="$1" field_id="$2" value="$3"
+  if [[ -z "$PROJECT_NODE_ID" ]] || [[ -z "$item_id" ]] || [[ -z "$field_id" ]]; then
+    return 0
+  fi
+
+  gh api graphql -f query='
+    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $text: String!) {
+      updateProjectV2ItemFieldValue(input: {
+        projectId: $projectId
+        itemId: $itemId
+        fieldId: $fieldId
+        value: {text: $text}
+      }) {
+        projectV2Item { id }
+      }
+    }' -f projectId="$PROJECT_NODE_ID" -f itemId="$item_id" \
+       -f fieldId="$field_id" -f text="$value" >/dev/null 2>&1 || {
+    log_debug "Failed to update text field on item $item_id"
+    return 1
+  }
+}
+
+# Set the status of an issue on the project board
+# Usage: project_board_set_status <issue_number> <status_name>
+# status_name: "Todo", "Queued", "In Progress", "In Review", "Done"
+project_board_set_status() {
+  local issue_num="$1" status_name="$2"
+  if [[ -z "$PROJECT_NODE_ID" ]] || [[ -z "$PROJECT_STATUS_FIELD_ID" ]]; then return 0; fi
+
+  local option_id="${PROJECT_STATUS_OPTIONS[$status_name]:-}"
+  if [[ -z "$option_id" ]]; then
+    log_debug "Unknown project status: $status_name"
+    return 1
+  fi
+
+  # Ensure issue is on the board
+  local item_id
+  item_id=$(project_board_add_issue "$issue_num") || return 1
+  if [[ -z "$item_id" ]]; then return 1; fi
+
+  project_board_update_select "$item_id" "$PROJECT_STATUS_FIELD_ID" "$option_id"
+}
+
+# Set the Ralphy Batch field for an issue
+# Usage: project_board_set_batch <issue_number> <label>  (e.g., "ralphy-1")
+project_board_set_batch() {
+  local issue_num="$1" label="$2"
+  if [[ -z "$PROJECT_NODE_ID" ]] || [[ -z "$PROJECT_BATCH_FIELD_ID" ]]; then return 0; fi
+
+  local option_id="${PROJECT_BATCH_OPTIONS[$label]:-}"
+  if [[ -z "$option_id" ]]; then
+    log_debug "No batch option for label: $label"
+    return 0
+  fi
+
+  local item_id
+  item_id=$(project_board_add_issue "$issue_num") || return 1
+  if [[ -z "$item_id" ]]; then return 1; fi
+
+  project_board_update_select "$item_id" "$PROJECT_BATCH_FIELD_ID" "$option_id"
+}
+
+# Set the Branch field for an issue
+# Usage: project_board_set_branch <issue_number> <branch_name>
+project_board_set_branch() {
+  local issue_num="$1" branch_name="$2"
+  if [[ -z "$PROJECT_NODE_ID" ]] || [[ -z "$PROJECT_BRANCH_FIELD_ID" ]]; then return 0; fi
+
+  local item_id
+  item_id=$(project_board_add_issue "$issue_num") || return 1
+  if [[ -z "$item_id" ]]; then return 1; fi
+
+  project_board_update_text "$item_id" "$PROJECT_BRANCH_FIELD_ID" "$branch_name"
+}
+
+# Convenience: set up a task on the board when processing starts
+# Usage: project_board_task_started <task>  (format: "number:title")
+project_board_task_started() {
+  local task="$1"
+  local issue_num="${task%%:*}"
+  if [[ -z "$PROJECT_NODE_ID" ]]; then return 0; fi
+
+  # Add to board, set status, set batch label
+  project_board_set_status "$issue_num" "In Progress" &
+  if [[ -n "$GITHUB_LABEL" ]]; then
+    project_board_set_batch "$issue_num" "$GITHUB_LABEL" &
+  fi
+  wait
+}
+
+# Convenience: mark a task done on the board
+# Usage: project_board_task_completed <task> [branch_name]
+project_board_task_completed() {
+  local task="$1"
+  local branch_name="${2:-}"
+  local issue_num="${task%%:*}"
+  if [[ -z "$PROJECT_NODE_ID" ]]; then return 0; fi
+
+  project_board_set_status "$issue_num" "Done" &
+  if [[ -n "$branch_name" ]]; then
+    project_board_set_branch "$issue_num" "$branch_name" &
+  fi
+  wait
+}
+
+# Convenience: mark a task as in review on the board
+# Usage: project_board_task_in_review <task> [branch_name]
+project_board_task_in_review() {
+  local task="$1"
+  local branch_name="${2:-}"
+  local issue_num="${task%%:*}"
+  if [[ -z "$PROJECT_NODE_ID" ]]; then return 0; fi
+
+  project_board_set_status "$issue_num" "In Review" &
+  if [[ -n "$branch_name" ]]; then
+    project_board_set_branch "$issue_num" "$branch_name" &
+  fi
+  wait
+}
+
+# Convenience: mark a task as queued on the board
+# Usage: project_board_task_queued <task>
+project_board_task_queued() {
+  local task="$1"
+  local issue_num="${task%%:*}"
+  if [[ -z "$PROJECT_NODE_ID" ]]; then return 0; fi
+
+  project_board_set_status "$issue_num" "Queued"
+  if [[ -n "$GITHUB_LABEL" ]]; then
+    project_board_set_batch "$issue_num" "$GITHUB_LABEL"
+  fi
 }
 
 # ============================================
@@ -324,48 +618,123 @@ is_issue_claimed() {
   return 1  # Issue is not claimed
 }
 
-# Extract domain hints from issue title/body
-# Returns: backend, frontend, database, api, ui, tests, docs, infra, unknown
+# Extract domain hints from issue title/body/labels
+# Returns: backend, frontend, database, tests, docs, infra, security, billing, unknown
+# Detection tiers (highest confidence first):
+#   1. Explicit [Tag] in issue title
+#   2. GitHub issue labels
+#   3. File path patterns in title+body
+#   4. Keyword matching (most specific domains first to avoid misclassification)
 get_issue_domain() {
   local title="$1"
   local body="${2:-}"
+  local labels="${3:-}"
   local combined
   combined=$(echo "$title $body" | tr '[:upper:]' '[:lower:]')
+  local labels_lower
+  labels_lower=$(echo "$labels" | tr '[:upper:]' '[:lower:]')
 
-  # Check for explicit tags in title
-  if echo "$title" | grep -qiE '^\[backend\]|\[api\]|\[server\]'; then
-    echo "backend"
-  elif echo "$title" | grep -qiE '^\[frontend\]|\[ui\]|\[client\]|\[component\]'; then
-    echo "frontend"
-  elif echo "$title" | grep -qiE '^\[database\]|\[db\]|\[schema\]|\[migration\]'; then
-    echo "database"
-  elif echo "$title" | grep -qiE '^\[test\]|\[testing\]|\[e2e\]'; then
-    echo "tests"
-  elif echo "$title" | grep -qiE '^\[docs\]|\[documentation\]'; then
-    echo "docs"
-  elif echo "$title" | grep -qiE '^\[infra\]|\[ci\]|\[deploy\]|\[docker\]'; then
-    echo "infra"
-  # Check body for file path patterns
-  elif echo "$combined" | grep -qE 'src/(api|server|backend|routers?|services?)'; then
-    echo "backend"
-  elif echo "$combined" | grep -qE 'src/(components?|pages?|app/|ui/)'; then
-    echo "frontend"
-  elif echo "$combined" | grep -qE 'src/db/|schema|migration|drizzle'; then
-    echo "database"
-  elif echo "$combined" | grep -qE 'tests?/|\.test\.|\.spec\.'; then
-    echo "tests"
-  # Check for keywords
-  elif echo "$combined" | grep -qE 'trpc|router|endpoint|mutation|query' | head -1; then
-    echo "backend"
-  elif echo "$combined" | grep -qE 'component|hook|useState|useEffect|jsx|tsx|react'; then
-    echo "frontend"
-  else
-    echo "unknown"
+  # === TIER 1: Explicit tags in title (highest confidence) ===
+  if echo "$title" | grep -qiE '^\[(backend|api|server)\]'; then
+    echo "backend"; return
+  elif echo "$title" | grep -qiE '^\[(frontend|ui|client|component|ux)\]'; then
+    echo "frontend"; return
+  elif echo "$title" | grep -qiE '^\[(database|db|schema|migration)\]'; then
+    echo "database"; return
+  elif echo "$title" | grep -qiE '^\[(test|testing|e2e|qa)\]'; then
+    echo "tests"; return
+  elif echo "$title" | grep -qiE '^\[(docs?|documentation)\]'; then
+    echo "docs"; return
+  elif echo "$title" | grep -qiE '^\[(infra|ci|deploy|docker|devops)\]'; then
+    echo "infra"; return
+  elif echo "$title" | grep -qiE '^\[(security|vuln|cve)\]'; then
+    echo "security"; return
+  elif echo "$title" | grep -qiE '^\[(billing|payments?|stripe)\]'; then
+    echo "billing"; return
   fi
+
+  # === TIER 2: GitHub issue labels ===
+  if [[ -n "$labels_lower" ]]; then
+    if echo "$labels_lower" | grep -qE '(backend|api|server)'; then
+      echo "backend"; return
+    elif echo "$labels_lower" | grep -qE '(frontend|ui|ux|component)'; then
+      echo "frontend"; return
+    elif echo "$labels_lower" | grep -qE '(database|db|schema|migration)'; then
+      echo "database"; return
+    elif echo "$labels_lower" | grep -qE '(test|testing|e2e|qa)'; then
+      echo "tests"; return
+    elif echo "$labels_lower" | grep -qE '(documentation|docs)'; then
+      echo "docs"; return
+    elif echo "$labels_lower" | grep -qE '(infra|ci|deploy|docker|devops)'; then
+      echo "infra"; return
+    elif echo "$labels_lower" | grep -qE '(security|vuln|cve)'; then
+      echo "security"; return
+    elif echo "$labels_lower" | grep -qE '(billing|payment|stripe)'; then
+      echo "billing"; return
+    fi
+  fi
+
+  # === TIER 3: File path patterns in title+body ===
+  if echo "$combined" | grep -qE 'src/(api|server|backend|routers?|services?|middleware|lib/(api|auth|trpc))'; then
+    echo "backend"; return
+  elif echo "$combined" | grep -qE 'src/(components?|pages?|app/\(|ui/|hooks?/)'; then
+    echo "frontend"; return
+  elif echo "$combined" | grep -qE '(src/db/|drizzle/|\.schema\.ts|drizzle\.config)'; then
+    echo "database"; return
+  elif echo "$combined" | grep -qE '(tests?/|\.test\.|\.spec\.|__tests__|playwright)'; then
+    echo "tests"; return
+  elif echo "$combined" | grep -qE '(\.github/|docker|Dockerfile|Caddyfile)'; then
+    echo "infra"; return
+  fi
+
+  # === TIER 4: Keyword matching (most specific domains checked first) ===
+
+  # Security - highly specific terms, checked first to catch security fixes
+  if echo "$combined" | grep -qE 'vulnerabilit|cve-[0-9]|xss|csrf|sql.injection|sanitiz(e|ation)|prototype.pollution|owasp|content.security.policy|hsts|security.header|security.fix|security.patch|security.audit|secret.leak|credential.leak|privilege.escalat|access.control|brute.force|password.hash'; then
+    echo "security"; return
+  fi
+
+  # Billing - highly specific terms
+  if echo "$combined" | grep -qE 'stripe|subscription|invoice|payment|billing|pricing.page|checkout|coupon|discount|refund|metered|usage.based|plan.limit|free.trial|paywall'; then
+    echo "billing"; return
+  fi
+
+  # Database - specific to schema/data layer
+  if echo "$combined" | grep -qE 'drizzle|neon.postgres|database.migration|schema.change|add.column|drop.column|create.table|alter.table|foreign.key|db.constraint|seed.data|db.connection|db.index'; then
+    echo "database"; return
+  fi
+
+  # Docs - checked before infra/tests to avoid "deploy" in "deployment docs" matching infra
+  if echo "$combined" | grep -qE 'readme|documentation|changelog|contributing|api.doc|swagger|openapi.spec|jsdoc|typedoc|storybook'; then
+    echo "docs"; return
+  fi
+
+  # Tests - testing-specific terms
+  if echo "$combined" | grep -qE 'playwright|jest|vitest|test.coverage|test.fixture|e2e.test|integration.test|unit.test|snapshot.test|regression.test|flaky.test|test.suite|test.helper|test.util'; then
+    echo "tests"; return
+  fi
+
+  # Infra - CI/CD, deployment, build tooling
+  if echo "$combined" | grep -qE 'docker|container|github.action|deploy|caddy|nginx|ssl.cert|dns|cloudflare|aws|lightsail|ci.cd|pipeline|health.check|monitoring|sentry|build.fail|bundle.size|turbopack|dockerfile|env.var|environment.variable|github.workflow|docker.compose'; then
+    echo "infra"; return
+  fi
+
+  # Backend - broader terms (checked after more specific domains)
+  if echo "$combined" | grep -qE 'trpc|router|endpoint|mutation|middleware|webhook|cron.job|auth|session|jwt|oauth|cors|rate.limit|cache|redis|queue|worker|email.send|notification|server.action|server.component|api.route|api.handler|request.handler|upload|download'; then
+    echo "backend"; return
+  fi
+
+  # Frontend - broadest terms (checked last)
+  if echo "$combined" | grep -qE 'component|usestate|useeffect|usecallback|usememo|useref|usecontext|jsx|tsx|react|button|modal|dialog|form.input|form.valid|data.table|chart|layout|sidebar|navbar|tooltip|dropdown|menu|panel|card|skeleton|loading|spinner|toast|alert|badge|icon|theme|dark.mode|responsive|css|tailwind|classname|shadcn|radix|dashboard|onboarding|wizard|stepper|animation|transition|popover|combobox|checkbox|radio|toggle|switch|accordion|breadcrumb|pagination|avatar|progress.bar|slider|tab.component|landing.page'; then
+    echo "frontend"; return
+  fi
+
+  echo "unknown"
 }
 
 # Determine if two issues can safely run in parallel
 # Returns 0 if safe, 1 if not safe
+# Sets LAST_DOMAIN1 and LAST_DOMAIN2 for callers to reuse (avoids duplicate API calls)
 can_issues_run_parallel() {
   local task1="$1"
   local task2="$2"
@@ -378,17 +747,23 @@ can_issues_run_parallel() {
   local num2="${task2%%:*}"
   local title2="${task2#*:}"
 
-  # Get issue bodies for more context
-  local body1="" body2=""
+  # Get issue bodies and labels for more context
+  local body1="" body2="" labels1="" labels2=""
   if [[ "$PRD_SOURCE" == "github" ]]; then
     body1=$(get_github_issue_body "$task1" 2>/dev/null || echo "")
     body2=$(get_github_issue_body "$task2" 2>/dev/null || echo "")
+    labels1=$(get_github_issue_labels "$task1" 2>/dev/null || echo "")
+    labels2=$(get_github_issue_labels "$task2" 2>/dev/null || echo "")
   fi
 
-  # Get domains
+  # Get domains (passing labels for better classification)
   local domain1 domain2
-  domain1=$(get_issue_domain "$title1" "$body1")
-  domain2=$(get_issue_domain "$title2" "$body2")
+  domain1=$(get_issue_domain "$title1" "$body1" "$labels1")
+  domain2=$(get_issue_domain "$title2" "$body2" "$labels2")
+
+  # Cache for callers (e.g., run_auto_parallel_batch display)
+  LAST_DOMAIN1="$domain1"
+  LAST_DOMAIN2="$domain2"
 
   log_debug "Issue $num1 domain: $domain1"
   log_debug "Issue $num2 domain: $domain2"
@@ -402,17 +777,31 @@ can_issues_run_parallel() {
   # Database changes should never run in parallel with anything
   [[ "$domain1" == "database" || "$domain2" == "database" ]] && return 1
 
+  # Security touches multiple layers - only safe with docs, tests, infra
+  # (security fixes often span backend+frontend, e.g., XSS, CORS, sanitization)
+
   # These domain pairs are safe to parallelize
   case "$domain1:$domain2" in
+    # Original safe pairs
     backend:frontend|frontend:backend) return 0 ;;
     backend:docs|docs:backend) return 0 ;;
     frontend:docs|docs:frontend) return 0 ;;
-    backend:tests|tests:backend) return 0 ;;  # Tests might touch same files, but usually isolated
+    backend:tests|tests:backend) return 0 ;;
     frontend:tests|tests:frontend) return 0 ;;
     backend:infra|infra:backend) return 0 ;;
     frontend:infra|infra:frontend) return 0 ;;
     docs:tests|tests:docs) return 0 ;;
     docs:infra|infra:docs) return 0 ;;
+    tests:infra|infra:tests) return 0 ;;
+    # Security - conservative: only with docs, tests, infra (no app code overlap)
+    security:docs|docs:security) return 0 ;;
+    security:tests|tests:security) return 0 ;;
+    security:infra|infra:security) return 0 ;;
+    # Billing - safe with frontend, docs, tests, infra (billing logic is backend-side)
+    billing:frontend|frontend:billing) return 0 ;;
+    billing:docs|docs:billing) return 0 ;;
+    billing:tests|tests:billing) return 0 ;;
+    billing:infra|infra:billing) return 0 ;;
     *) return 1 ;;  # Default to not safe
   esac
 }
@@ -540,6 +929,7 @@ ${BOLD}PRD SOURCE OPTIONS:${RESET}
   --yaml FILE         Use YAML task file instead of markdown
   --github REPO       Fetch tasks from GitHub issues (e.g., owner/repo)
   --github-label TAG  Filter GitHub issues by label
+  --project OWNER/NUM Link to a GitHub Project board (e.g., Venin-Client-Systems/2)
 
 ${BOLD}OTHER OPTIONS:${RESET}
   -v, --verbose       Show debug output
@@ -696,6 +1086,13 @@ parse_args() {
         ;;
       --github-label)
         GITHUB_LABEL="${2:-}"
+        shift 2
+        ;;
+      --project)
+        # Format: --project OWNER/NUM (e.g., Venin-Client-Systems/2)
+        local project_val="${2:-}"
+        PROJECT_BOARD_OWNER="${project_val%%/*}"
+        PROJECT_BOARD_NUM="${project_val##*/}"
         shift 2
         ;;
       -v|--verbose)
@@ -867,6 +1264,21 @@ check_requirements() {
   if [[ "$BRANCH_PER_TASK" == true ]] && [[ -z "$BASE_BRANCH" ]]; then
     BASE_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
     log_debug "Using base branch: $BASE_BRANCH"
+  fi
+
+  # Auto-detect project board from per-repo config if --project not specified
+  if [[ -z "$PROJECT_BOARD_NUM" ]] && [[ "$PRD_SOURCE" == "github" ]] && [[ -n "$GITHUB_REPO" ]]; then
+    local config_file="${HOME}/.ralphy/config"
+    if [[ -f "$config_file" ]]; then
+      # Look up repo-specific mapping: project.<owner/repo>=<owner/project-number>
+      local config_project
+      config_project=$(grep -E "^project\\.${GITHUB_REPO}=" "$config_file" 2>/dev/null | head -1 | cut -d= -f2-)
+      if [[ -n "$config_project" ]]; then
+        PROJECT_BOARD_OWNER="${config_project%%/*}"
+        PROJECT_BOARD_NUM="${config_project##*/}"
+        log_debug "Auto-detected project board for ${GITHUB_REPO}: $PROJECT_BOARD_OWNER/$PROJECT_BOARD_NUM"
+      fi
+    fi
   fi
 }
 
@@ -1142,6 +1554,9 @@ This issue was skipped by Ralphy and needs manual review.
 - Re-run ralphy" 2>/dev/null || true
   fi
 
+  # Update project board status to Blocked
+  project_board_set_status "$issue_num" "Blocked"
+
   log_warn "Issue $issue_num blocked: $reason"
 }
 
@@ -1257,6 +1672,12 @@ get_github_issue_body() {
   local task=$1
   local issue_num="${task%%:*}"
   gh issue view "$issue_num" --repo "$GITHUB_REPO" --json body --jq '.body' 2>/dev/null || echo ""
+}
+
+get_github_issue_labels() {
+  local task=$1
+  local issue_num="${task%%:*}"
+  gh issue view "$issue_num" --repo "$GITHUB_REPO" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || echo ""
 }
 
 # ============================================
@@ -1924,6 +2345,11 @@ run_single_task() {
 
   current_step="Thinking"
 
+  # Update project board: task starting
+  if [[ "$PRD_SOURCE" == "github" ]]; then
+    project_board_task_started "$current_task"
+  fi
+
   # Create branch if needed
   local branch_name=""
   if [[ "$BRANCH_PER_TASK" == true ]]; then
@@ -2146,6 +2572,7 @@ ${response:-Task implementation completed successfully.}
 **Commits:** \`${task_start_head:0:7}\`..\`${head_after:0:7}\`
 **Engine:** ${AI_ENGINE}"
         mark_task_complete "$current_task" "$completion_comment"
+        project_board_task_completed "$current_task" "${branch_name:-}"
         ((session_processed++))
       elif [[ "$no_code_ok" == true ]]; then
         # No code changes but issue allows it (decision/docs/chore)
@@ -2157,6 +2584,7 @@ ${response:-Task completed (no code changes required).}
 **Type:** Documentation/Decision/Chore
 **Engine:** ${AI_ENGINE}"
         mark_task_complete "$current_task" "$completion_comment"
+        project_board_task_completed "$current_task" "${branch_name:-}"
         ((session_processed++))
       elif [[ "$has_commits" == false ]]; then
         log_error "No new commit created; failing task and leaving issue open: $current_task"
@@ -2177,6 +2605,10 @@ ${response:-Task completed (no code changes required).}
     # Create PR if requested
     if [[ "$CREATE_PR" == true ]] && [[ -n "$branch_name" ]]; then
       create_pull_request "$branch_name" "$current_task" "Automated implementation by Ralphy"
+      # Update project board to "In Review" (overrides "Done" since PR needs review)
+      if [[ "$PRD_SOURCE" == "github" ]]; then
+        project_board_task_in_review "$current_task" "$branch_name"
+      fi
     fi
 
     # Return to base branch
@@ -2292,7 +2724,12 @@ run_parallel_agent() {
   local log_file="$5"
   
   echo "setting up" > "$status_file"
-  
+
+  # Update project board: task starting (parallel agent)
+  if [[ "$PRD_SOURCE" == "github" ]]; then
+    project_board_task_started "$task_name"
+  fi
+
   # Log setup info
   echo "Agent $agent_num starting for task: $task_name" >> "$log_file"
   echo "ORIGINAL_DIR=$ORIGINAL_DIR" >> "$log_file"
@@ -2492,8 +2929,12 @@ Focus only on implementing: $task_name"
           --body "Automated implementation by Ralphy (Agent $agent_num)" \
           ${PR_DRAFT:+--draft} 2>>"$log_file" || true
       )
+      # Update project board to "In Review"
+      if [[ "$PRD_SOURCE" == "github" ]]; then
+        project_board_task_in_review "$task_name" "$branch_name"
+      fi
     fi
-    
+
     # Capture summary info before cleanup
     local commits_summary=""
     commits_summary=$(git -C "$worktree_dir" log --oneline "$BASE_BRANCH"..HEAD 2>/dev/null | head -10)
@@ -2567,9 +3008,9 @@ run_auto_parallel_batch() {
   # Two tasks - run in mini-parallel
   local task1="${tasks[0]}"
   local task2="${tasks[1]}"
-  local domain1 domain2
-  domain1=$(get_issue_domain "${task1#*:}" "")
-  domain2=$(get_issue_domain "${task2#*:}" "")
+  # Reuse domains cached by can_issues_run_parallel (avoids re-detecting without body/labels)
+  local domain1="${LAST_DOMAIN1:-unknown}"
+  local domain2="${LAST_DOMAIN2:-unknown}"
 
   echo ""
   echo "${BOLD}>>> Tasks $iteration-$((iteration+1))${RESET} ${GREEN}(auto-parallel: $domain1 + $domain2)${RESET}"
@@ -2713,6 +3154,7 @@ ${commits_section:-No commits captured}
 ${files_section:-No file changes captured}
 \`\`\`"
           mark_task_complete_github "$task" "$comment"
+          project_board_task_completed "$task" "$branch"
         fi
         ;;
       blocked:*)
@@ -2989,6 +3431,7 @@ run_parallel_tasks() {
 
 Implementation completed successfully. See branch for commit details."
               mark_task_complete_github "$task" "$parallel_comment"
+              project_board_task_completed "$task" "$branch"
             fi
             ;;
           blocked:*)
@@ -3314,6 +3757,9 @@ main() {
   # Initialize multi-instance coordination
   init_instance_lock
 
+  # Initialize project board connection
+  project_board_init
+
   # Show banner
   echo "${BOLD}============================================${RESET}"
   echo "${BOLD}Ralphy${RESET} - Running until PRD is complete"
@@ -3344,6 +3790,7 @@ main() {
   [[ "$AUTO_PARALLEL" == true ]] && [[ "$PARALLEL" != true ]] && mode_parts+=("auto-parallel:$AUTO_PARALLEL_MAX")
   [[ "$BRANCH_PER_TASK" == true ]] && mode_parts+=("branch-per-task")
   [[ "$CREATE_PR" == true ]] && mode_parts+=("create-pr")
+  [[ -n "$PROJECT_NODE_ID" ]] && mode_parts+=("project-board")
   [[ $MAX_ITERATIONS -gt 0 ]] && mode_parts+=("max:$MAX_ITERATIONS")
 
   if [[ ${#mode_parts[@]} -gt 0 ]]; then
