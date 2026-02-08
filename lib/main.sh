@@ -87,7 +87,6 @@ main() {
 
   # Main loop - auto-parallel or sequential
   while true; do
-    ((++iteration))
     local result_code=0
 
     if [[ "$AUTO_PARALLEL" == true ]]; then
@@ -144,6 +143,7 @@ main() {
       esac
     else
       # Pure sequential mode - claim issue before starting
+      ((++iteration))
       local next_task
       next_task=$(get_next_unclaimed_task)
 

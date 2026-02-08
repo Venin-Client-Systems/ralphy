@@ -326,227 +326,178 @@ Focus only on implementing: $task_name"
 }
 
 # ============================================
-# AUTO-PARALLEL EXECUTION (Smart 2-at-a-time)
+# AUTO-PARALLEL EXECUTION (Sliding Window)
 # ============================================
 
-# Run 1-2 tasks based on domain detection
-# Returns: 0=success, 1=error, 2=no tasks
+# Run tasks with a sliding window: as soon as any agent finishes,
+# immediately start the next compatible task. No waiting for a full batch.
+# Returns: 0=success, 1=some failed, 2=all complete/no tasks
 run_auto_parallel_batch() {
-  # Get safe batch (returns 1 to AUTO_PARALLEL_MAX tasks)
-  local tasks=()
+  # Get all available (unclaimed) tasks
+  local all_tasks=()
   while IFS= read -r task; do
-    [[ -n "$task" ]] && tasks+=("$task")
-  done < <(get_parallel_safe_pair)
-
-  local task_count=${#tasks[@]}
-
-  if [[ $task_count -eq 0 ]]; then
-    return 2  # No tasks
-  fi
-
-  # Claim the issues and auto-label docs issues
-  for task in "${tasks[@]}"; do
+    [[ -z "$task" ]] && continue
     local issue_num="${task%%:*}"
-    claim_issue "$issue_num"
-    # Pre-emptively label docs issues so they can close without code changes
-    auto_label_docs_issue "$task"
-  done
+    if is_issue_claimed "$issue_num"; then
+      log_debug "Skipping issue $issue_num (claimed by another instance)"
+      continue
+    fi
+    all_tasks+=("$task")
+  done < <(get_all_tasks)
 
-  if [[ $task_count -eq 1 ]]; then
-    # Single task - run normally
-    local task="${tasks[0]}"
-    echo ""
-    echo "${BOLD}>>> Task $iteration${RESET} ${DIM}(sequential - no safe parallel pair found)${RESET}"
-    local result_code=0
-    run_single_task "$task" "$iteration" || result_code=$?
+  local total_tasks=${#all_tasks[@]}
+  [[ $total_tasks -eq 0 ]] && return 2
 
-    # Release the issue
-    local issue_num="${task%%:*}"
-    release_issue "$issue_num"
-
-    return $result_code
+  # Setup worktree infrastructure
+  ORIGINAL_DIR=$(pwd)
+  export ORIGINAL_DIR
+  WORKTREE_BASE=$(mktemp -d)
+  export WORKTREE_BASE
+  if [[ -z "$BASE_BRANCH" ]]; then
+    BASE_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
   fi
+  export BASE_BRANCH
+  export AI_ENGINE MAX_RETRIES RETRY_DELAY PRD_SOURCE PRD_FILE CREATE_PR PR_DRAFT GITHUB_REPO GITHUB_LABEL
 
-  # Multiple tasks - run in parallel
-  # Re-detect domains here because get_parallel_safe_pair runs in a process substitution
-  # (subshell), so domain cache variables don't propagate back to this shell.
-  local domains=()
-  for task in "${tasks[@]}"; do
+  # Pre-compute domains for all tasks (avoids repeated API calls)
+  local -a task_domains=()
+  for task in "${all_tasks[@]}"; do
     local t_title="${task#*:}"
     local t_body="" t_labels=""
     if [[ "$PRD_SOURCE" == "github" ]]; then
       t_body=$(get_github_issue_body "$task" 2>/dev/null || echo "")
       t_labels=$(get_github_issue_labels "$task" 2>/dev/null || echo "")
     fi
-    domains+=($(get_issue_domain "$t_title" "$t_body" "$t_labels"))
+    task_domains+=("$(get_issue_domain "$t_title" "$t_body" "$t_labels")")
   done
 
-  local last_task_idx=$((iteration + task_count - 1))
-  local domain_display
-  domain_display=$(IFS=" + "; echo "${domains[*]}")
+  # Track which tasks have been started (by index into all_tasks)
+  local -a task_started=()
+  for ((i=0; i<total_tasks; i++)); do task_started+=(""); done
 
+  # Sliding window: fixed-size slot arrays (empty pid = free slot)
+  local -a sw_pids=() sw_tasks=() sw_domains=()
+  local -a sw_status_files=() sw_output_files=() sw_log_files=() sw_agent_nums=()
+  for ((s=0; s<AUTO_PARALLEL_MAX; s++)); do
+    sw_pids+=("") sw_tasks+=("") sw_domains+=("")
+    sw_status_files+=("") sw_output_files+=("") sw_log_files+=("") sw_agent_nums+=("")
+  done
+
+  local sw_active=0 sw_started=0 sw_done=0 sw_failed=0
+  local sw_any_failed=false
+  local sw_start_time=$SECONDS
+
+  # Display header
   echo ""
-  echo "${BOLD}>>> Tasks $iteration-$last_task_idx${RESET} ${GREEN}(auto-parallel: $domain_display)${RESET}"
-  for task in "${tasks[@]}"; do
-    echo "  ${CYAN}◉${RESET} ${task:0:60}"
-  done
+  echo "${BOLD}>>> Sliding window${RESET} ${GREEN}(up to $AUTO_PARALLEL_MAX concurrent, $total_tasks tasks queued)${RESET}"
   echo ""
 
-  # Store original directory
-  ORIGINAL_DIR=$(pwd)
-  export ORIGINAL_DIR
-
-  # Set up worktree base
-  WORKTREE_BASE=$(mktemp -d)
-  export WORKTREE_BASE
-
-  # Ensure base branch
-  if [[ -z "$BASE_BRANCH" ]]; then
-    BASE_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-  fi
-  export BASE_BRANCH
-
-  # Export needed vars
-  export AI_ENGINE MAX_RETRIES RETRY_DELAY PRD_SOURCE PRD_FILE CREATE_PR PR_DRAFT GITHUB_REPO GITHUB_LABEL
-
-  # Setup for both tasks
-  local status_files=() output_files=() log_files=()
-  local pids=()
-
-  for idx in "${!tasks[@]}"; do
-    local task="${tasks[$idx]}"
-    local agent_num=$((iteration + idx))
-    local status_file=$(mktemp)
-    local output_file=$(mktemp)
-    local log_file=$(mktemp)
-
-    status_files+=("$status_file")
-    output_files+=("$output_file")
-    log_files+=("$log_file")
-
-    echo "waiting" > "$status_file"
-
-    # Run agent in background
-    (
-      run_parallel_agent "$task" "$agent_num" "$output_file" "$status_file" "$log_file"
-    ) &
-    pids+=($!)
-  done
-
-  # Wait with spinner, timeout, and stuck detection
-  local spinner_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-  local spin_idx=0
-  local start_time=$SECONDS
-  local stuck_warned=false
-  local PARALLEL_TIMEOUT_SECS=1800  # 30 minutes max per batch
-  local STUCK_WARNING_SECS=900      # Warn after 15 minutes
-
-  while true; do
-    local all_done=true
-    local running=0 done_count=0 failed=0
-
-    for idx in "${!status_files[@]}"; do
-      local status=$(cat "${status_files[$idx]}" 2>/dev/null || echo "waiting")
-      case "$status" in
-        done) ((done_count++)) ;;
-        failed|blocked:*) ((failed++)) ;;
-        *)
-          if kill -0 "${pids[$idx]}" 2>/dev/null; then
-            all_done=false
-            ((running++))
-          fi
-          ;;
-      esac
+  # --- Fill initial slots ---
+  for ((s=0; s<AUTO_PARALLEL_MAX; s++)); do
+    # Find next compatible task
+    local found_idx=""
+    for ((t=0; t<total_tasks; t++)); do
+      [[ -n "${task_started[$t]}" ]] && continue
+      local candidate_domain="${task_domains[$t]}"
+      local compatible=true
+      for ((s2=0; s2<AUTO_PARALLEL_MAX; s2++)); do
+        [[ -z "${sw_pids[$s2]}" ]] && continue
+        if ! are_domains_compatible "$candidate_domain" "${sw_domains[$s2]}"; then
+          compatible=false
+          break
+        fi
+      done
+      if [[ "$compatible" == true ]]; then
+        found_idx="$t"
+        break
+      fi
     done
 
-    [[ "$all_done" == true ]] && break
+    [[ -z "$found_idx" ]] && break
 
-    local elapsed=$((SECONDS - start_time))
-
-    # Stuck detection: warn once after 15 minutes
-    if [[ $elapsed -ge $STUCK_WARNING_SECS ]] && [[ "$stuck_warned" == false ]]; then
-      stuck_warned=true
-      local stuck_tasks=""
-      for idx in "${!status_files[@]}"; do
-        local st=$(cat "${status_files[$idx]}" 2>/dev/null || echo "waiting")
-        if [[ "$st" != "done" ]] && [[ "$st" != "failed" ]] && [[ "$st" != blocked:* ]]; then
-          stuck_tasks+="${tasks[$idx]:0:50} "
-        fi
-      done
-      notify_task_stuck "$stuck_tasks" "$((elapsed / 60))"
-      log_warn "Agents running for ${elapsed}s — may be stuck: $stuck_tasks"
-    fi
-
-    # Hard timeout: kill remaining agents after 30 minutes
-    if [[ $elapsed -ge $PARALLEL_TIMEOUT_SECS ]]; then
-      log_error "Parallel batch timed out after $((elapsed / 60))m — killing remaining agents"
-      notify_error "Batch timed out after $((elapsed / 60))m"
-      for idx in "${!pids[@]}"; do
-        local st=$(cat "${status_files[$idx]}" 2>/dev/null || echo "waiting")
-        if [[ "$st" != "done" ]] && [[ "$st" != "failed" ]] && [[ "$st" != blocked:* ]]; then
-          kill "${pids[$idx]}" 2>/dev/null || true
-          echo "failed" > "${status_files[$idx]}"
-        fi
-      done
-      break
-    fi
-
-    local spin_char="${spinner_chars:$spin_idx:1}"
-    spin_idx=$(( (spin_idx + 1) % ${#spinner_chars} ))
-
-    printf "\r  ${CYAN}%s${RESET} Running: %d | Done: %d | Failed: %d | %02d:%02d " \
-      "$spin_char" "$running" "$done_count" "$failed" $((elapsed / 60)) $((elapsed % 60))
-
-    sleep 0.3
-  done
-
-  printf "\r%80s\r" ""  # Clear line
-
-  # Wait for processes
-  for pid in "${pids[@]}"; do
-    wait "$pid" 2>/dev/null || true
-  done
-
-  # Process results
-  local any_failed=false
-  local tasks_succeeded=0
-
-  for idx in "${!status_files[@]}"; do
-    local task="${tasks[$idx]}"
+    # Start task in this slot
+    local task="${all_tasks[$found_idx]}"
+    local domain="${task_domains[$found_idx]}"
     local issue_num="${task%%:*}"
-    local status=$(cat "${status_files[$idx]}" 2>/dev/null || echo "unknown")
-    local agent_num=$((iteration + idx))
+    task_started[$found_idx]="true"
+    ((iteration++))
+    ((sw_started++))
+    claim_issue "$issue_num"
+    auto_label_docs_issue "$task"
 
-    local icon color
-    case "$status" in
-      done)
-        icon="✓" color="$GREEN"
-        ((tasks_succeeded++))
-        ((session_processed++))
-        notify_task_done "#${issue_num}: ${task#*:}"
+    if [[ "$PRD_SOURCE" == "github" ]]; then
+      project_board_task_started "$task"
+    fi
 
-        # Get tokens and summary from output file
-        local output_content=$(cat "${output_files[$idx]}" 2>/dev/null || echo "0 0 unknown")
-        local first_line=$(echo "$output_content" | head -1)
-        local in_tok=$(echo "$first_line" | awk '{print $1}')
-        local out_tok=$(echo "$first_line" | awk '{print $2}')
-        local branch=$(echo "$first_line" | awk '{print $3}')
+    local status_file=$(mktemp) output_file=$(mktemp) log_file=$(mktemp)
+    echo "waiting" > "$status_file"
 
-        # Extract commits and files summary
-        local commits_section=$(echo "$output_content" | sed -n '/---COMMITS---/,/---FILES---/p' | grep -v '^---')
-        local files_section=$(echo "$output_content" | sed -n '/---FILES---/,$ p' | grep -v '^---')
-        [[ "$in_tok" =~ ^[0-9]+$ ]] || in_tok=0
-        [[ "$out_tok" =~ ^[0-9]+$ ]] || out_tok=0
-        total_input_tokens=$((total_input_tokens + in_tok))
-        total_output_tokens=$((total_output_tokens + out_tok))
+    sw_tasks[$s]="$task"
+    sw_domains[$s]="$domain"
+    sw_status_files[$s]="$status_file"
+    sw_output_files[$s]="$output_file"
+    sw_log_files[$s]="$log_file"
+    sw_agent_nums[$s]="$iteration"
 
-        # Mark complete
-        if [[ "$PRD_SOURCE" == "markdown" ]]; then
-          mark_task_complete_markdown "$task"
-        elif [[ "$PRD_SOURCE" == "yaml" ]]; then
-          mark_task_complete_yaml "$task"
-        elif [[ "$PRD_SOURCE" == "github" ]]; then
-          local comment="## Task Completed by Ralphy (Agent $agent_num)
+    ( run_parallel_agent "$task" "$iteration" "$output_file" "$status_file" "$log_file" ) &
+    sw_pids[$s]=$!
+    ((sw_active++))
+
+    printf "  ${CYAN}▶${RESET} Agent %d: %s ${DIM}(%s)${RESET}\n" "$iteration" "${task:0:55}" "$domain"
+  done
+
+  # --- Sliding window loop ---
+  local spinner_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  local spin_idx=0
+  local stuck_warned=false
+  local PARALLEL_TIMEOUT_SECS=1800  # 30 minutes max
+  local STUCK_WARNING_SECS=900      # Warn after 15 minutes
+
+  while [[ $sw_active -gt 0 ]]; do
+    # Check each slot for completion
+    for ((s=0; s<AUTO_PARALLEL_MAX; s++)); do
+      [[ -z "${sw_pids[$s]}" ]] && continue
+
+      # Is this agent still running?
+      if kill -0 "${sw_pids[$s]}" 2>/dev/null; then
+        continue
+      fi
+
+      # --- Agent in slot $s completed ---
+      wait "${sw_pids[$s]}" 2>/dev/null || true
+      ((sw_active--))
+
+      local task="${sw_tasks[$s]}"
+      local issue_num="${task%%:*}"
+      local agent_num="${sw_agent_nums[$s]}"
+      local status=$(cat "${sw_status_files[$s]}" 2>/dev/null || echo "unknown")
+
+      local icon color
+      case "$status" in
+        done)
+          icon="✓" color="$GREEN"
+          ((sw_done++))
+          ((session_processed++))
+          notify_task_done "#${issue_num}: ${task#*:}"
+
+          local output_content=$(cat "${sw_output_files[$s]}" 2>/dev/null || echo "0 0 unknown")
+          local first_line=$(echo "$output_content" | head -1)
+          local in_tok=$(echo "$first_line" | awk '{print $1}')
+          local out_tok=$(echo "$first_line" | awk '{print $2}')
+          local branch=$(echo "$first_line" | awk '{print $3}')
+          local commits_section=$(echo "$output_content" | sed -n '/---COMMITS---/,/---FILES---/p' | grep -v '^---')
+          local files_section=$(echo "$output_content" | sed -n '/---FILES---/,$ p' | grep -v '^---')
+          [[ "$in_tok" =~ ^[0-9]+$ ]] || in_tok=0
+          [[ "$out_tok" =~ ^[0-9]+$ ]] || out_tok=0
+          total_input_tokens=$((total_input_tokens + in_tok))
+          total_output_tokens=$((total_output_tokens + out_tok))
+
+          if [[ "$PRD_SOURCE" == "markdown" ]]; then
+            mark_task_complete_markdown "$task"
+          elif [[ "$PRD_SOURCE" == "yaml" ]]; then
+            mark_task_complete_yaml "$task"
+          elif [[ "$PRD_SOURCE" == "github" ]]; then
+            local comment="## Task Completed by Ralphy (Agent $agent_num)
 
 **Branch:** \`$branch\`
 **Engine:** ${AI_ENGINE}
@@ -560,46 +511,156 @@ ${commits_section:-No commits captured}
 \`\`\`
 ${files_section:-No file changes captured}
 \`\`\`"
-          mark_task_complete_github "$task" "$comment"
-          project_board_task_completed "$task" "$branch"
+            mark_task_complete_github "$task" "$comment"
+            project_board_task_completed "$task" "$branch"
+          fi
+          ;;
+        blocked:*)
+          icon="⊘" color="$YELLOW"
+          ((sw_failed++))
+          local reason="${status#blocked:}"
+          mark_issue_blocked "$task" "$reason"
+          ;;
+        failed)
+          icon="✗" color="$RED"
+          ((sw_failed++))
+          sw_any_failed=true
+          notify_error "Issue #${issue_num} failed: ${task#*:}"
+          ;;
+        *)
+          icon="?" color="$YELLOW"
+          ((sw_failed++))
+          ;;
+      esac
+
+      # Clear spinner line, print result, then spinner resumes
+      printf "\r%80s\r" ""
+      printf "  ${color}%s${RESET} Agent %d: %s\n" "$icon" "$agent_num" "${task:0:55}"
+
+      if [[ "$status" == "failed" ]] && [[ -s "${sw_log_files[$s]}" ]]; then
+        echo "${DIM}    └─ $(tail -1 "${sw_log_files[$s]}")${RESET}"
+      fi
+
+      release_issue "$issue_num"
+      rm -f "${sw_status_files[$s]}" "${sw_output_files[$s]}" "${sw_log_files[$s]}"
+
+      # Free the slot
+      sw_pids[$s]=""
+      sw_tasks[$s]=""
+      sw_domains[$s]=""
+
+      # --- Try to fill this slot with the next compatible task ---
+      local found_idx=""
+      for ((t=0; t<total_tasks; t++)); do
+        [[ -n "${task_started[$t]}" ]] && continue
+        local candidate_domain="${task_domains[$t]}"
+        local compatible=true
+        for ((s2=0; s2<AUTO_PARALLEL_MAX; s2++)); do
+          [[ -z "${sw_pids[$s2]}" ]] && continue
+          if ! are_domains_compatible "$candidate_domain" "${sw_domains[$s2]}"; then
+            compatible=false
+            break
+          fi
+        done
+        if [[ "$compatible" == true ]]; then
+          found_idx="$t"
+          break
         fi
-        ;;
-      blocked:*)
-        icon="⊘" color="$YELLOW"
-        local reason="${status#blocked:}"
-        mark_issue_blocked "$task" "$reason"
-        ;;
-      failed)
-        icon="✗" color="$RED"
-        any_failed=true
-        notify_error "Issue #${issue_num} failed: ${task#*:}"
-        ;;
-      *)
-        icon="?" color="$YELLOW"
-        ;;
-    esac
+      done
 
-    printf "  ${color}%s${RESET} Agent %d: %s\n" "$icon" "$agent_num" "${task:0:55}"
+      if [[ -n "$found_idx" ]]; then
+        local next_task="${all_tasks[$found_idx]}"
+        local next_domain="${task_domains[$found_idx]}"
+        local next_issue="${next_task%%:*}"
+        task_started[$found_idx]="true"
+        ((iteration++))
+        ((sw_started++))
+        claim_issue "$next_issue"
+        auto_label_docs_issue "$next_task"
 
-    # Show log for failures
-    if [[ "$status" == "failed" ]] && [[ -s "${log_files[$idx]}" ]]; then
-      echo "${DIM}    └─ $(tail -1 "${log_files[$idx]}")${RESET}"
+        if [[ "$PRD_SOURCE" == "github" ]]; then
+          project_board_task_started "$next_task"
+        fi
+
+        local new_sf=$(mktemp) new_of=$(mktemp) new_lf=$(mktemp)
+        echo "waiting" > "$new_sf"
+
+        sw_tasks[$s]="$next_task"
+        sw_domains[$s]="$next_domain"
+        sw_status_files[$s]="$new_sf"
+        sw_output_files[$s]="$new_of"
+        sw_log_files[$s]="$new_lf"
+        sw_agent_nums[$s]="$iteration"
+
+        ( run_parallel_agent "$next_task" "$iteration" "$new_of" "$new_sf" "$new_lf" ) &
+        sw_pids[$s]=$!
+        ((sw_active++))
+
+        printf "  ${CYAN}▶${RESET} Agent %d: %s ${DIM}(%s)${RESET}\n" "$iteration" "${next_task:0:55}" "$next_domain"
+      fi
+    done
+
+    # Exit if nothing running
+    [[ $sw_active -eq 0 ]] && break
+
+    local elapsed=$(( SECONDS - sw_start_time ))
+
+    # Stuck detection
+    if [[ $elapsed -ge $STUCK_WARNING_SECS ]] && [[ "$stuck_warned" == false ]]; then
+      stuck_warned=true
+      local stuck_tasks=""
+      for ((s=0; s<AUTO_PARALLEL_MAX; s++)); do
+        [[ -z "${sw_pids[$s]}" ]] && continue
+        stuck_tasks+="${sw_tasks[$s]:0:50} "
+      done
+      notify_task_stuck "$stuck_tasks" "$((elapsed / 60))"
+      log_warn "Agents running for ${elapsed}s — may be stuck: $stuck_tasks"
     fi
 
-    # Release the issue
-    release_issue "$issue_num"
+    # Hard timeout
+    if [[ $elapsed -ge $PARALLEL_TIMEOUT_SECS ]]; then
+      log_error "Sliding window timed out after $((elapsed / 60))m — killing remaining agents"
+      notify_error "Timed out after $((elapsed / 60))m"
+      for ((s=0; s<AUTO_PARALLEL_MAX; s++)); do
+        [[ -z "${sw_pids[$s]}" ]] && continue
+        kill "${sw_pids[$s]}" 2>/dev/null || true
+        echo "failed" > "${sw_status_files[$s]}"
+        wait "${sw_pids[$s]}" 2>/dev/null || true
+        ((sw_active--))
+        ((sw_failed++))
+        local t_task="${sw_tasks[$s]}"
+        local t_issue="${t_task%%:*}"
+        printf "  ${RED}✗${RESET} Agent %d: %s ${DIM}(timed out)${RESET}\n" "${sw_agent_nums[$s]}" "${t_task:0:55}"
+        release_issue "$t_issue"
+        rm -f "${sw_status_files[$s]}" "${sw_output_files[$s]}" "${sw_log_files[$s]}"
+        sw_pids[$s]=""
+      done
+      break
+    fi
 
-    # Cleanup temp files
-    rm -f "${status_files[$idx]}" "${output_files[$idx]}" "${log_files[$idx]}"
+    # Update spinner
+    local spin_char="${spinner_chars:$spin_idx:1}"
+    spin_idx=$(( (spin_idx + 1) % ${#spinner_chars} ))
+    local queued=$(( total_tasks - sw_started ))
+    [[ $queued -lt 0 ]] && queued=0
+
+    printf "\r  ${CYAN}%s${RESET} Running: %d | Done: %d | Failed: %d | Queued: %d | %02d:%02d " \
+      "$spin_char" "$sw_active" "$sw_done" "$sw_failed" "$queued" \
+      $((elapsed / 60)) $((elapsed % 60))
+
+    sleep 0.3
   done
+
+  printf "\r%80s\r" ""  # Clear spinner line
 
   # Cleanup worktree base
   if [[ -d "$WORKTREE_BASE" ]]; then
     rm -rf "$WORKTREE_BASE" 2>/dev/null || true
   fi
 
-  # Increment iteration for additional tasks (first one is counted by the main loop)
-  iteration=$((iteration + task_count - 1))
+  # Summary line
+  echo ""
+  echo "${BOLD}Window complete:${RESET} ${GREEN}$sw_done done${RESET} | ${RED}$sw_failed failed${RESET} | $total_tasks total"
 
   # Check remaining tasks
   local remaining
@@ -611,10 +672,9 @@ ${files_section:-No file changes captured}
     return 2  # All complete
   fi
 
-  [[ "$any_failed" == true ]] && return 1
+  [[ "$sw_any_failed" == true ]] && return 1
   return 0
 }
-
 run_parallel_tasks() {
   log_info "Running ${BOLD}$MAX_PARALLEL parallel agents${RESET} (each in isolated worktree)..."
 

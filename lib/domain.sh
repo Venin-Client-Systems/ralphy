@@ -116,6 +116,42 @@ get_issue_domain() {
   echo "unknown"
 }
 
+# Check if two domains can safely run in parallel
+# Returns 0 if safe, 1 if not
+are_domains_compatible() {
+  local d1="$1" d2="$2"
+
+  # Unknown domains can't be parallelized safely
+  [[ "$d1" == "unknown" || "$d2" == "unknown" ]] && return 1
+
+  # Same domain = likely to conflict
+  [[ "$d1" == "$d2" ]] && return 1
+
+  # Database changes should never run in parallel with anything
+  [[ "$d1" == "database" || "$d2" == "database" ]] && return 1
+
+  case "$d1:$d2" in
+    backend:frontend|frontend:backend) return 0 ;;
+    backend:docs|docs:backend) return 0 ;;
+    frontend:docs|docs:frontend) return 0 ;;
+    backend:tests|tests:backend) return 0 ;;
+    frontend:tests|tests:frontend) return 0 ;;
+    backend:infra|infra:backend) return 0 ;;
+    frontend:infra|infra:frontend) return 0 ;;
+    docs:tests|tests:docs) return 0 ;;
+    docs:infra|infra:docs) return 0 ;;
+    tests:infra|infra:tests) return 0 ;;
+    security:docs|docs:security) return 0 ;;
+    security:tests|tests:security) return 0 ;;
+    security:infra|infra:security) return 0 ;;
+    billing:frontend|frontend:billing) return 0 ;;
+    billing:docs|docs:billing) return 0 ;;
+    billing:tests|tests:billing) return 0 ;;
+    billing:infra|infra:billing) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Determine if two issues can safely run in parallel
 # Returns 0 if safe, 1 if not safe
 # Sets LAST_DOMAIN1 and LAST_DOMAIN2 for callers to reuse (avoids duplicate API calls)
@@ -152,42 +188,7 @@ can_issues_run_parallel() {
   log_debug "Issue $num1 domain: $domain1"
   log_debug "Issue $num2 domain: $domain2"
 
-  # If either is unknown, don't parallelize (be safe)
-  [[ "$domain1" == "unknown" || "$domain2" == "unknown" ]] && return 1
-
-  # Same domain = likely to conflict
-  [[ "$domain1" == "$domain2" ]] && return 1
-
-  # Database changes should never run in parallel with anything
-  [[ "$domain1" == "database" || "$domain2" == "database" ]] && return 1
-
-  # Security touches multiple layers - only safe with docs, tests, infra
-  # (security fixes often span backend+frontend, e.g., XSS, CORS, sanitization)
-
-  # These domain pairs are safe to parallelize
-  case "$domain1:$domain2" in
-    # Original safe pairs
-    backend:frontend|frontend:backend) return 0 ;;
-    backend:docs|docs:backend) return 0 ;;
-    frontend:docs|docs:frontend) return 0 ;;
-    backend:tests|tests:backend) return 0 ;;
-    frontend:tests|tests:frontend) return 0 ;;
-    backend:infra|infra:backend) return 0 ;;
-    frontend:infra|infra:frontend) return 0 ;;
-    docs:tests|tests:docs) return 0 ;;
-    docs:infra|infra:docs) return 0 ;;
-    tests:infra|infra:tests) return 0 ;;
-    # Security - conservative: only with docs, tests, infra (no app code overlap)
-    security:docs|docs:security) return 0 ;;
-    security:tests|tests:security) return 0 ;;
-    security:infra|infra:security) return 0 ;;
-    # Billing - safe with frontend, docs, tests, infra (billing logic is backend-side)
-    billing:frontend|frontend:billing) return 0 ;;
-    billing:docs|docs:billing) return 0 ;;
-    billing:tests|tests:billing) return 0 ;;
-    billing:infra|infra:billing) return 0 ;;
-    *) return 1 ;;  # Default to not safe
-  esac
+  are_domains_compatible "$domain1" "$domain2"
 }
 
 # Get next unclaimed task (skips issues claimed by other instances)
