@@ -514,6 +514,17 @@ ${files_section:-No file changes captured}
             mark_task_complete_github "$task" "$comment"
             project_board_task_completed "$task" "$branch"
           fi
+
+          # Merge agent branch back into base branch (skip if PRs are being created)
+          if [[ "$CREATE_PR" != true ]] && [[ -n "$branch" ]] && [[ "$branch" != "unknown" ]]; then
+            if git -C "$ORIGINAL_DIR" merge --no-edit "$branch" >/dev/null 2>&1; then
+              log_debug "Merged $branch into $BASE_BRANCH"
+              git -C "$ORIGINAL_DIR" branch -d "$branch" >/dev/null 2>&1 || true
+            else
+              log_warn "Merge conflict merging $branch into $BASE_BRANCH — aborting merge, branch preserved for manual resolution"
+              git -C "$ORIGINAL_DIR" merge --abort 2>/dev/null || true
+            fi
+          fi
           ;;
         blocked:*)
           icon="⊘" color="$YELLOW"
