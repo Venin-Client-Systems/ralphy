@@ -3,35 +3,13 @@
 # ============================================
 
 # Create an isolated worktree for a parallel agent
+# Delegates to guardrail_atomic_worktree for rollback-safe creation + ledger tracking
 create_agent_worktree() {
   local task_name="$1"
   local agent_num="$2"
-  local branch_name="ralphy/agent-${agent_num}-$(slugify "$task_name")"
-  local worktree_dir="${WORKTREE_BASE}/agent-${agent_num}"
+  local issue="${3:-unknown}"
 
-  # Run git commands from original directory
-  # All git output goes to stderr so it doesn't interfere with our return value
-  (
-    cd "$ORIGINAL_DIR" || { echo "Failed to cd to $ORIGINAL_DIR" >&2; exit 1; }
-
-    # Prune any stale worktrees first
-    git worktree prune >&2
-
-    # Delete branch if it exists (force)
-    git branch -D "$branch_name" >&2 2>/dev/null || true
-
-    # Create branch from base
-    git branch "$branch_name" "$BASE_BRANCH" >&2 || { echo "Failed to create branch $branch_name from $BASE_BRANCH" >&2; exit 1; }
-
-    # Remove existing worktree dir if any
-    rm -rf "$worktree_dir" 2>/dev/null || true
-
-    # Create worktree
-    git worktree add "$worktree_dir" "$branch_name" >&2 || { echo "Failed to create worktree at $worktree_dir" >&2; exit 1; }
-  )
-
-  # Only output the result - git commands above send their output to stderr
-  echo "$worktree_dir|$branch_name"
+  guardrail_atomic_worktree "$task_name" "$agent_num" "$issue"
 }
 
 # Cleanup worktree after agent completes
@@ -99,8 +77,9 @@ run_parallel_agent() {
   echo "BASE_BRANCH=$BASE_BRANCH" >> "$log_file"
 
   # Create isolated worktree for this agent
+  local issue_id="${task_name%%:*}"
   local worktree_info
-  worktree_info=$(create_agent_worktree "$task_name" "$agent_num" 2>>"$log_file")
+  worktree_info=$(create_agent_worktree "$task_name" "$agent_num" "$issue_id" 2>>"$log_file")
   local worktree_dir="${worktree_info%%|*}"
   local branch_name="${worktree_info##*|}"
 
@@ -129,10 +108,22 @@ run_parallel_agent() {
   # Ensure progress.txt exists in worktree
   touch "$worktree_dir/progress.txt"
 
+  # Copy repo-specific lessons file to worktree (if it exists)
+  if [[ -f "$ORIGINAL_DIR/RALPHY_LESSONS.md" ]]; then
+    cp "$ORIGINAL_DIR/RALPHY_LESSONS.md" "$worktree_dir/" 2>/dev/null || true
+  fi
+
   # Build prompt for this specific task
+  local lessons_ref=""
+  if [[ -f "$worktree_dir/RALPHY_LESSONS.md" ]]; then
+    lessons_ref="
+BEFORE STARTING: Read @RALPHY_LESSONS.md for repo-specific rules and past mistakes. Follow all rules in that file."
+  fi
+
   local prompt="You are working on a specific task. Focus ONLY on this task:
 
 TASK: $task_name
+${lessons_ref}
 
 Instructions:
 1. Implement this specific task completely
@@ -141,6 +132,16 @@ Instructions:
 4. Commit your changes with a descriptive message
 5. IMPORTANT: You MUST use tools to read and edit files in this repo. Do not respond with a plan only.
    If you cannot access tools or the repo, respond exactly with 'TOOL_ACCESS_FAILED'.
+
+SCOPE RULES (MANDATORY):
+- ONLY modify files directly required by this task.
+- Do NOT refactor, rename, delete, or 'clean up' code outside the task scope.
+- Do NOT remove imports, files, or utilities used by other parts of the codebase.
+- Do NOT undo or revert changes from other issues/PRs.
+- If you think something outside scope needs changing, note it in progress.txt but do NOT change it.
+- Other agents are working on other tasks in parallel. Their work must not be disrupted.
+
+LEARNINGS: If you discover a new pattern, pitfall, or rule specific to this repo, append it to RALPHY_LESSONS.md under 'Agent Learnings' before committing.
 
 Do NOT modify PRD.md or mark tasks complete - that will be handled separately.
 Focus only on implementing: $task_name"
@@ -313,6 +314,9 @@ Focus only on implementing: $task_name"
       echo "$files_changed"
     } > "$output_file"
 
+    # Extract learnings from agent worktree before cleanup
+    guardrail_merge_lessons "$worktree_dir" "$ORIGINAL_DIR" 2>/dev/null || true
+
     # Cleanup worktree (but keep branch)
     cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
 
@@ -357,6 +361,7 @@ run_auto_parallel_batch() {
     BASE_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
   fi
   export BASE_BRANCH
+  guardrail_validate_base_branch
   export AI_ENGINE MAX_RETRIES RETRY_DELAY PRD_SOURCE PRD_FILE CREATE_PR PR_DRAFT GITHUB_REPO GITHUB_LABEL
 
   # Pre-compute domains for all tasks (avoids repeated API calls)
@@ -519,10 +524,16 @@ ${files_section:-No file changes captured}
           if [[ "$CREATE_PR" != true ]] && [[ -n "$branch" ]] && [[ "$branch" != "unknown" ]]; then
             if git -C "$ORIGINAL_DIR" merge --no-edit "$branch" >/dev/null 2>&1; then
               log_debug "Merged $branch into $BASE_BRANCH"
-              git -C "$ORIGINAL_DIR" branch -d "$branch" >/dev/null 2>&1 || true
+              # Verify merge actually landed commits before deleting branch
+              if guardrail_verify_merge "$branch" "$ORIGINAL_DIR"; then
+                git -C "$ORIGINAL_DIR" branch -d "$branch" >/dev/null 2>&1 || true
+              else
+                log_warn "Merge verification failed for $branch — branch preserved"
+              fi
             else
               log_warn "Merge conflict merging $branch into $BASE_BRANCH — aborting merge, branch preserved for manual resolution"
               git -C "$ORIGINAL_DIR" merge --abort 2>/dev/null || true
+              guardrail_update_branch "$branch" "failed"
             fi
           fi
           ;;
@@ -718,6 +729,7 @@ run_parallel_tasks() {
     BASE_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
   fi
   export BASE_BRANCH
+  guardrail_validate_base_branch
   log_info "Base branch: $BASE_BRANCH"
 
   # Export variables needed by subshell agents
@@ -1005,13 +1017,20 @@ Implementation completed successfully. See branch for commit details."
 
         # Attempt to merge
         if git merge --no-edit "$branch" >/dev/null 2>&1; then
-          printf " ${GREEN}✓${RESET}
+          # Verify merge actually landed commits before deleting branch
+          if guardrail_verify_merge "$branch"; then
+            printf " ${GREEN}✓${RESET}
 "
-          # Delete the branch after successful merge
-          git branch -d "$branch" >/dev/null 2>&1 || true
+            git branch -d "$branch" >/dev/null 2>&1 || true
+          else
+            printf " ${YELLOW}merge verified failed${RESET}
+"
+            log_warn "Merge verification failed for $branch — branch preserved"
+          fi
         else
           printf " ${YELLOW}conflict${RESET}"
           merge_failed+=("$branch")
+          guardrail_update_branch "$branch" "failed"
           # Don't abort yet - try AI resolution
         fi
       done
@@ -1038,12 +1057,18 @@ Implementation completed successfully. See branch for commit details."
               printf " ${RED}✗${RESET}
 "
               still_failed+=("$branch")
+              guardrail_update_branch "$branch" "failed"
               git merge --abort 2>/dev/null || true
               continue
             }
-            printf " ${GREEN}✓${RESET}
+            if guardrail_verify_merge "$branch"; then
+              printf " ${GREEN}✓${RESET}
 "
-            git branch -d "$branch" >/dev/null 2>&1 || true
+              git branch -d "$branch" >/dev/null 2>&1 || true
+            else
+              printf " ${YELLOW}verify failed${RESET}
+"
+            fi
             continue
           fi
 
@@ -1102,14 +1127,20 @@ Be careful to preserve functionality from BOTH branches. The goal is to integrat
           # Check if merge was completed
           if ! git diff --name-only --diff-filter=U 2>/dev/null | grep -q .; then
             # No more conflicts - merge succeeded
-            printf " ${GREEN}✓ (AI resolved)${RESET}
+            if guardrail_verify_merge "$branch"; then
+              printf " ${GREEN}✓ (AI resolved)${RESET}
 "
-            git branch -d "$branch" >/dev/null 2>&1 || true
+              git branch -d "$branch" >/dev/null 2>&1 || true
+            else
+              printf " ${YELLOW}✓ (AI resolved, verify failed — branch preserved)${RESET}
+"
+            fi
           else
             # Still has conflicts
             printf " ${RED}✗ (AI couldn't resolve)${RESET}
 "
             still_failed+=("$branch")
+            guardrail_update_branch "$branch" "failed"
             git merge --abort 2>/dev/null || true
           fi
         done

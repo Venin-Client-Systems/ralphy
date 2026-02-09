@@ -25,6 +25,7 @@ init_instance_lock() {
   "label": "${GITHUB_LABEL:-}",
   "repo": "${GITHUB_REPO:-}",
   "prd_source": "${PRD_SOURCE}",
+  "base_branch": "${BASE_BRANCH:-}",
   "started": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "current_issues": [],
   "cwd": "$(pwd)"

@@ -135,6 +135,10 @@ check_requirements() {
     log_warn "Token tracking and multi-instance coordination may not work properly"
   fi
 
+  # Run git state guardrails
+  guardrail_preflight
+  guardrail_init_ledger
+
   # Create progress.txt if missing
   if [[ ! -f "progress.txt" ]]; then
     log_warn "progress.txt not found, creating it..."
