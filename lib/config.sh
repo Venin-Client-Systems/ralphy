@@ -78,6 +78,7 @@ declare -a recent_failed_tasks=() # Rolling window of recently failed task IDs
 MAX_CONSECUTIVE_FAILURES=3        # After this many failures on same task, take action
 WORKTREE_BASE=""  # Base directory for parallel agent worktrees
 ORIGINAL_DIR=""   # Original working directory (for worktree operations)
+RALPHY_BRANCH_LEDGER=""  # Append-only branch ledger file path
 
 # Multi-instance coordination
 RALPHY_LOCK_DIR="${HOME}/.ralphy/instances"

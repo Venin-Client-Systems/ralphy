@@ -29,9 +29,25 @@ $issue_body
       ;;
   esac
 
+  # Add lessons file reference if it exists
+  if [[ -f "RALPHY_LESSONS.md" ]]; then
+    prompt="$prompt
+BEFORE STARTING: Read @RALPHY_LESSONS.md for repo-specific rules and past mistakes. Follow all rules in that file."
+  fi
+
   prompt="$prompt
 IMPORTANT: You MUST use tools to read and edit files in this repo. Do not respond with a plan only.
 If you cannot access tools or the repo, respond exactly with 'TOOL_ACCESS_FAILED'.
+
+SCOPE RULES (MANDATORY):
+- ONLY modify files directly required by the task.
+- Do NOT refactor, rename, delete, or 'clean up' code outside the task scope.
+- Do NOT remove imports, files, or utilities used by other parts of the codebase.
+- Do NOT undo or revert changes from other issues/PRs.
+- If you think something outside scope needs changing, note it in progress.txt but do NOT change it.
+
+LEARNINGS: If you discover a new pattern, pitfall, or rule specific to this repo, append it to RALPHY_LESSONS.md under 'Agent Learnings' before committing.
+
 1. Find the highest-priority incomplete task and implement it."
 
   local step=2

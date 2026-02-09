@@ -182,6 +182,9 @@ cleanup() {
   # Cleanup instance lock file
   cleanup_instance_lock
 
+  # Post-run audit: detect unmerged branches from this instance
+  guardrail_post_run_audit 2>/dev/null || true
+
   # Cleanup parallel worktrees
   if [[ -n "$WORKTREE_BASE" ]] && [[ -d "$WORKTREE_BASE" ]]; then
     # Remove all worktrees we created
