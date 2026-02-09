@@ -387,6 +387,109 @@ run_auto_parallel_batch() {
   local sw_any_failed=false
   local sw_start_time=$SECONDS
 
+  # --- ANSI in-place dashboard ---
+  # The dashboard is a fixed block at the bottom of the terminal that updates
+  # in-place. Events (completions, errors, slot fills) print permanently above it.
+  local _db_printed=false
+  local _db_is_tty=false
+  [[ -t 1 ]] && _db_is_tty=true
+  # Dashboard = 1 header + AUTO_PARALLEL_MAX slots + 1 summary = N+2 lines
+  local _db_lines=$((AUTO_PARALLEL_MAX + 2))
+
+  # Track idle reasons per slot (updated by fill logic)
+  local -a sw_idle_reasons=()
+  for ((s=0; s<AUTO_PARALLEL_MAX; s++)); do sw_idle_reasons+=(""); done
+
+  # Compute why idle slots can't be filled (call after any slot change)
+  _dashboard_compute_idle() {
+    for ((ds=0; ds<AUTO_PARALLEL_MAX; ds++)); do
+      [[ -n "${sw_pids[$ds]}" ]] && { sw_idle_reasons[$ds]=""; continue; }
+      # Find first unstarted task and explain why it's blocked
+      local reason="no tasks queued"
+      for ((t=0; t<total_tasks; t++)); do
+        [[ -n "${task_started[$t]}" ]] && continue
+        local cd="${task_domains[$t]}"
+        local ct_issue="${all_tasks[$t]%%:*}"
+        local blocked_by=""
+        for ((s2=0; s2<AUTO_PARALLEL_MAX; s2++)); do
+          [[ -z "${sw_pids[$s2]}" ]] && continue
+          if ! are_domains_compatible "$cd" "${sw_domains[$s2]}"; then
+            blocked_by="Slot $((s2+1))"
+            break
+          fi
+        done
+        if [[ -n "$blocked_by" ]]; then
+          reason="next #${ct_issue} (${cd}) blocked by ${blocked_by}"
+        else
+          reason=""  # compatible task exists — shouldn't be idle
+        fi
+        break  # only check first unstarted task
+      done
+      sw_idle_reasons[$ds]="$reason"
+    done
+  }
+
+  # Print/update the in-place dashboard
+  _dashboard_print() {
+    local elapsed=$(( SECONDS - sw_start_time ))
+    local queued=$(( total_tasks - sw_started ))
+    [[ $queued -lt 0 ]] && queued=0
+
+    if [[ "$_db_is_tty" == true ]]; then
+      # Move cursor up to overwrite previous dashboard
+      if [[ "$_db_printed" == true ]]; then
+        printf "\033[${_db_lines}A"
+      fi
+      _db_printed=true
+
+      # Header line
+      printf "\033[2K  ${DIM}─── [%02d:%02d] ──────────────────────────────────────────────${RESET}\n" \
+        $((elapsed / 60)) $((elapsed % 60))
+
+      # Slot lines
+      for ((ds=0; ds<AUTO_PARALLEL_MAX; ds++)); do
+        printf "\033[2K"
+        if [[ -n "${sw_pids[$ds]}" ]]; then
+          local se=$(( SECONDS - ${sw_start_times[$ds]:-$SECONDS} ))
+          local se_fmt
+          if [[ $se -ge 60 ]]; then se_fmt="$(( se / 60 ))m$(( se % 60 ))s"; else se_fmt="${se}s"; fi
+          local st="${sw_tasks[$ds]}"
+          local si="${st%%:*}"
+          local sn="${st#*:}"
+          printf "  ${CYAN}▶${RESET} Slot %d: ${WHITE}#%s${RESET} %-44s ${DIM}(%s, %s)${RESET}\n" \
+            "$((ds + 1))" "$si" "${sn:0:44}" "${sw_domains[$ds]}" "$se_fmt"
+        else
+          local idle_reason="${sw_idle_reasons[$ds]}"
+          if [[ -n "$idle_reason" ]]; then
+            printf "  ${DIM}·${RESET} Slot %d: ${DIM}idle — %s${RESET}\n" "$((ds + 1))" "$idle_reason"
+          else
+            printf "  ${DIM}·${RESET} Slot %d: ${DIM}idle${RESET}\n" "$((ds + 1))"
+          fi
+        fi
+      done
+
+      # Summary line
+      printf "\033[2K  ${DIM}Done: ${GREEN}%d${RESET}${DIM} · Failed: ${RED}%d${RESET}${DIM} · Active: ${CYAN}%d${RESET}${DIM} · Queued: %d · Total: %d${RESET}\n" \
+        "$sw_done" "$sw_failed" "$sw_active" "$queued" "$total_tasks"
+    fi
+  }
+
+  # Print a permanent event line above the dashboard
+  _dashboard_event() {
+    local msg="$1"
+    if [[ "$_db_is_tty" == true ]] && [[ "$_db_printed" == true ]]; then
+      # Erase dashboard, print event, reprint dashboard
+      printf "\033[${_db_lines}A"
+      for ((i=0; i<_db_lines; i++)); do printf "\033[2K\n"; done
+      printf "\033[${_db_lines}A"
+      printf "%s\n" "$msg"
+      _db_printed=false
+      _dashboard_print
+    else
+      printf "%s\n" "$msg"
+    fi
+  }
+
   # Display header
   echo ""
   echo "${BOLD}>>> Sliding window${RESET} ${GREEN}(up to $AUTO_PARALLEL_MAX concurrent, $total_tasks tasks queued)${RESET}"
@@ -447,14 +550,14 @@ run_auto_parallel_batch() {
     printf "  ${CYAN}▶${RESET} Slot %d ${DIM}[%d/%d]${RESET}: %s ${DIM}(%s)${RESET}\n" "$((s + 1))" "$sw_started" "$total_tasks" "${task:0:55}" "$domain"
   done
 
+  # Compute idle reasons and show initial dashboard
+  _dashboard_compute_idle
+  _dashboard_print
+
   # --- Sliding window loop ---
-  local spinner_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-  local spin_idx=0
   local stuck_warned=false
   local PARALLEL_TIMEOUT_SECS=1800  # 30 minutes max
   local STUCK_WARNING_SECS=900      # Warn after 15 minutes
-  local last_status_print=0         # Timestamp of last newline status print
-  local STATUS_PRINT_INTERVAL=30    # Print a persistent status line every 30s
 
   while [[ $sw_active -gt 0 ]]; do
     # Check each slot for completion
@@ -579,19 +682,12 @@ ${files_section:-No file changes captured}
           ;;
       esac
 
-      # Clear spinner line, print result with details
-      printf "\r%80s\r" ""
-      printf "  ${color}%s${RESET} Slot %d: %s%s\n" "$icon" "$((s + 1))" "${task:0:55}" "$detail_line"
-
+      # Print completion event above dashboard
+      local event_line="  ${color}${icon}${RESET} Slot $((s + 1)): ${task:0:55}${detail_line}"
       if [[ "$status" == "failed" ]] && [[ -s "${sw_log_files[$s]}" ]]; then
-        echo "${DIM}    └─ $(tail -1 "${sw_log_files[$s]}")${RESET}"
+        event_line+=$'\n'"${DIM}    └─ $(tail -1 "${sw_log_files[$s]}")${RESET}"
       fi
-
-      # Progress tally after each completion
-      local queued_now=$(( total_tasks - sw_started ))
-      [[ $queued_now -lt 0 ]] && queued_now=0
-      printf "    ${DIM}Progress: ${GREEN}%d done${RESET}${DIM} · ${YELLOW}%d blocked${RESET}${DIM} · ${CYAN}%d active${RESET}${DIM} · %d queued · %d total${RESET}\n" \
-        "$sw_done" "$sw_failed" "$sw_active" "$queued_now" "$total_tasks"
+      _dashboard_event "$event_line"
 
       release_issue "$issue_num"
       rm -f "${sw_status_files[$s]}" "${sw_output_files[$s]}" "${sw_log_files[$s]}"
@@ -649,8 +745,11 @@ ${files_section:-No file changes captured}
         sw_start_times[$s]=$SECONDS
         ((sw_active++)) || true
 
-        printf "  ${CYAN}▶${RESET} Slot %d ${DIM}[%d/%d]${RESET}: %s ${DIM}(%s)${RESET}\n" "$((s + 1))" "$sw_started" "$total_tasks" "${next_task:0:55}" "$next_domain"
+        _dashboard_event "  ${CYAN}▶${RESET} Slot $((s + 1)) ${DIM}[$sw_started/$total_tasks]${RESET}: ${next_task:0:55} ${DIM}(${next_domain})${RESET}"
       fi
+
+      # Recompute idle reasons after any slot change
+      _dashboard_compute_idle
     done
 
     # Exit if nothing running
@@ -689,7 +788,7 @@ ${files_section:-No file changes captured}
         ((sw_failed++)) || true
         local t_task="${sw_tasks[$s]}"
         local t_issue="${t_task%%:*}"
-        printf "  ${RED}✗${RESET} Slot %d: %s ${DIM}(timed out)${RESET}\n" "$((s + 1))" "${t_task:0:55}"
+        _dashboard_event "  ${RED}✗${RESET} Slot $((s + 1)): ${t_task:0:55} ${DIM}(timed out)${RESET}"
         release_issue "$t_issue"
         rm -f "${sw_status_files[$s]}" "${sw_output_files[$s]}" "${sw_log_files[$s]}"
         sw_pids[$s]=""
@@ -697,29 +796,18 @@ ${files_section:-No file changes captured}
       break
     fi
 
-    # Update spinner
-    local spin_char="${spinner_chars:$spin_idx:1}"
-    spin_idx=$(( (spin_idx + 1) % ${#spinner_chars} ))
-    local queued=$(( total_tasks - sw_started ))
-    [[ $queued -lt 0 ]] && queued=0
+    # Update dashboard in-place (every iteration, ~1s)
+    _dashboard_print
 
-    # Periodic persistent status line (newline-based, can't be clobbered)
-    if [[ $((elapsed - last_status_print)) -ge $STATUS_PRINT_INTERVAL ]]; then
-      last_status_print=$elapsed
-      printf "\r%80s\r" ""
-      printf "  ${DIM}[%02d:%02d]${RESET} Running: ${CYAN}%d${RESET} | Done: ${GREEN}%d${RESET} | Failed: ${RED}%d${RESET} | Queued: %d\n" \
-        $((elapsed / 60)) $((elapsed % 60)) "$sw_active" "$sw_done" "$sw_failed" "$queued"
-    fi
-
-    # In-place spinner (fast update between persistent lines)
-    printf "\r  ${CYAN}%s${RESET} Running: %d | Done: %d | Failed: %d | Queued: %d | %02d:%02d " \
-      "$spin_char" "$sw_active" "$sw_done" "$sw_failed" "$queued" \
-      $((elapsed / 60)) $((elapsed % 60))
-
-    sleep 0.3
+    sleep 1
   done
 
-  printf "\r%80s\r" ""  # Clear spinner line
+  # Clear the in-place dashboard now that we're done
+  if [[ "$_db_is_tty" == true ]] && [[ "$_db_printed" == true ]]; then
+    printf "\033[${_db_lines}A"
+    for ((i=0; i<_db_lines; i++)); do printf "\033[2K\n"; done
+    printf "\033[${_db_lines}A"
+  fi
 
   # Cleanup worktree base
   if [[ -d "$WORKTREE_BASE" ]]; then
