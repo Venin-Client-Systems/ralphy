@@ -47,11 +47,12 @@ if [[ -t 1 ]] && command -v tput &>/dev/null && [[ $(tput colors 2>/dev/null || 
   BLUE=$(tput setaf 4)
   MAGENTA=$(tput setaf 5)
   CYAN=$(tput setaf 6)
+  WHITE=$(tput setaf 7)
   BOLD=$(tput bold)
   DIM=$(tput dim)
   RESET=$(tput sgr0)
 else
-  RED="" GREEN="" YELLOW="" BLUE="" MAGENTA="" CYAN="" BOLD="" DIM="" RESET=""
+  RED="" GREEN="" YELLOW="" BLUE="" MAGENTA="" CYAN="" WHITE="" BOLD="" DIM="" RESET=""
 fi
 
 # Global state
