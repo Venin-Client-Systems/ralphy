@@ -65,11 +65,6 @@ run_parallel_agent() {
 
   echo "setting up" > "$status_file"
 
-  # Update project board: task starting (parallel agent)
-  if [[ "$PRD_SOURCE" == "github" ]]; then
-    project_board_task_started "$task_name"
-  fi
-
   # Log setup info
   echo "Agent $agent_num starting for task: $task_name" >> "$log_file"
   echo "ORIGINAL_DIR=$ORIGINAL_DIR" >> "$log_file"
@@ -208,7 +203,7 @@ Focus only on implementing: $task_name"
     if [[ -n "$result" ]]; then
       local error_msg
       if ! error_msg=$(check_for_errors "$result"); then
-        ((retry++))
+        ((retry++)) || true
         echo "API error: $error_msg (attempt $retry/$MAX_RETRIES)" >> "$log_file"
         sleep "$RETRY_DELAY"
         continue
@@ -229,7 +224,7 @@ Focus only on implementing: $task_name"
       break
     fi
 
-    ((retry++))
+    ((retry++)) || true
     echo "Retry $retry/$MAX_RETRIES after empty response" >> "$log_file"
     sleep "$RETRY_DELAY"
   done
@@ -425,8 +420,8 @@ run_auto_parallel_batch() {
     local domain="${task_domains[$found_idx]}"
     local issue_num="${task%%:*}"
     task_started[$found_idx]="true"
-    ((iteration++))
-    ((sw_started++))
+    ((iteration++)) || true
+    ((sw_started++)) || true
     claim_issue "$issue_num"
     auto_label_docs_issue "$task"
 
@@ -447,9 +442,9 @@ run_auto_parallel_batch() {
     ( run_parallel_agent "$task" "$iteration" "$output_file" "$status_file" "$log_file" ) &
     sw_pids[$s]=$!
     sw_start_times[$s]=$SECONDS
-    ((sw_active++))
+    ((sw_active++)) || true
 
-    printf "  ${CYAN}▶${RESET} Agent %d ${DIM}[%d/%d]${RESET}: %s ${DIM}(%s)${RESET}\n" "$iteration" "$sw_started" "$total_tasks" "${task:0:55}" "$domain"
+    printf "  ${CYAN}▶${RESET} Slot %d ${DIM}[%d/%d]${RESET}: %s ${DIM}(%s)${RESET}\n" "$((s + 1))" "$sw_started" "$total_tasks" "${task:0:55}" "$domain"
   done
 
   # --- Sliding window loop ---
@@ -466,6 +461,11 @@ run_auto_parallel_batch() {
     for ((s=0; s<AUTO_PARALLEL_MAX; s++)); do
       [[ -z "${sw_pids[$s]}" ]] && continue
 
+      # Early timeout bailout (checked per-slot, not just per-iteration)
+      if [[ $(( SECONDS - sw_start_time )) -ge $PARALLEL_TIMEOUT_SECS ]]; then
+        break
+      fi
+
       # Is this agent still running?
       if kill -0 "${sw_pids[$s]}" 2>/dev/null; then
         continue
@@ -473,7 +473,7 @@ run_auto_parallel_batch() {
 
       # --- Agent in slot $s completed ---
       wait "${sw_pids[$s]}" 2>/dev/null || true
-      ((sw_active--))
+      ((sw_active--)) || true
 
       local task="${sw_tasks[$s]}"
       local issue_num="${task%%:*}"
@@ -491,8 +491,8 @@ run_auto_parallel_batch() {
       case "$status" in
         done)
           icon="✓" color="$GREEN"
-          ((sw_done++))
-          ((session_processed++))
+          ((sw_done++)) || true
+          ((session_processed++)) || true
           notify_task_done "#${issue_num}: ${task#*:}"
 
           local output_content=$(cat "${sw_output_files[$s]}" 2>/dev/null || echo "0 0 unknown")
@@ -535,7 +535,12 @@ ${files_section:-No file changes captured}
 
           # Merge agent branch back into base branch (skip if PRs are being created)
           if [[ "$CREATE_PR" != true ]] && [[ -n "$branch" ]] && [[ "$branch" != "unknown" ]]; then
-            if git -C "$ORIGINAL_DIR" merge --no-edit "$branch" >/dev/null 2>&1; then
+            # Verify we're on the expected branch before merging
+            local current_head
+            current_head=$(git -C "$ORIGINAL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+            if [[ "$current_head" != "$BASE_BRANCH" ]]; then
+              log_warn "Expected $BASE_BRANCH but on $current_head — skipping merge of $branch"
+            elif git -C "$ORIGINAL_DIR" merge --no-edit "$branch" >/dev/null 2>&1; then
               log_debug "Merged $branch into $BASE_BRANCH"
               # Verify merge actually landed commits before deleting branch
               if guardrail_verify_merge "$branch" "$ORIGINAL_DIR"; then
@@ -552,7 +557,7 @@ ${files_section:-No file changes captured}
           ;;
         blocked:*)
           icon="⊘" color="$YELLOW"
-          ((sw_failed++))
+          ((sw_failed++)) || true
           local reason="${status#blocked:}"
           mark_issue_blocked "$task" "$reason"
           detail_line=" ${DIM}— ${reason} (${agent_elapsed_fmt})${RESET}"
@@ -560,7 +565,7 @@ ${files_section:-No file changes captured}
           ;;
         failed)
           icon="✗" color="$RED"
-          ((sw_failed++))
+          ((sw_failed++)) || true
           sw_any_failed=true
           notify_error "Issue #${issue_num} failed: ${task#*:}"
           detail_line=" ${DIM}(${agent_elapsed_fmt})${RESET}"
@@ -568,7 +573,7 @@ ${files_section:-No file changes captured}
           ;;
         *)
           icon="?" color="$YELLOW"
-          ((sw_failed++))
+          ((sw_failed++)) || true
           detail_line=" ${DIM}(${agent_elapsed_fmt})${RESET}"
           completed_task_details+=("unknown|$agent_num|$issue_num|${task#*:}||$agent_elapsed")
           ;;
@@ -576,7 +581,7 @@ ${files_section:-No file changes captured}
 
       # Clear spinner line, print result with details
       printf "\r%80s\r" ""
-      printf "  ${color}%s${RESET} Agent %d: %s%s\n" "$icon" "$agent_num" "${task:0:55}" "$detail_line"
+      printf "  ${color}%s${RESET} Slot %d: %s%s\n" "$icon" "$((s + 1))" "${task:0:55}" "$detail_line"
 
       if [[ "$status" == "failed" ]] && [[ -s "${sw_log_files[$s]}" ]]; then
         echo "${DIM}    └─ $(tail -1 "${sw_log_files[$s]}")${RESET}"
@@ -620,8 +625,8 @@ ${files_section:-No file changes captured}
         local next_domain="${task_domains[$found_idx]}"
         local next_issue="${next_task%%:*}"
         task_started[$found_idx]="true"
-        ((iteration++))
-        ((sw_started++))
+        ((iteration++)) || true
+        ((sw_started++)) || true
         claim_issue "$next_issue"
         auto_label_docs_issue "$next_task"
 
@@ -642,9 +647,9 @@ ${files_section:-No file changes captured}
         ( run_parallel_agent "$next_task" "$iteration" "$new_of" "$new_sf" "$new_lf" ) &
         sw_pids[$s]=$!
         sw_start_times[$s]=$SECONDS
-        ((sw_active++))
+        ((sw_active++)) || true
 
-        printf "  ${CYAN}▶${RESET} Agent %d ${DIM}[%d/%d]${RESET}: %s ${DIM}(%s)${RESET}\n" "$iteration" "$sw_started" "$total_tasks" "${next_task:0:55}" "$next_domain"
+        printf "  ${CYAN}▶${RESET} Slot %d ${DIM}[%d/%d]${RESET}: %s ${DIM}(%s)${RESET}\n" "$((s + 1))" "$sw_started" "$total_tasks" "${next_task:0:55}" "$next_domain"
       fi
     done
 
@@ -671,14 +676,20 @@ ${files_section:-No file changes captured}
       notify_error "Timed out after $((elapsed / 60))m"
       for ((s=0; s<AUTO_PARALLEL_MAX; s++)); do
         [[ -z "${sw_pids[$s]}" ]] && continue
-        kill "${sw_pids[$s]}" 2>/dev/null || true
+        # Kill entire process tree (claude + children)
+        local descendants
+        descendants=$(get_all_descendants "${sw_pids[$s]}" 2>/dev/null || true)
+        for dpid in $descendants; do
+          kill -TERM "$dpid" 2>/dev/null || true
+        done
+        kill -TERM "${sw_pids[$s]}" 2>/dev/null || true
         echo "failed" > "${sw_status_files[$s]}"
         wait "${sw_pids[$s]}" 2>/dev/null || true
-        ((sw_active--))
-        ((sw_failed++))
+        ((sw_active--)) || true
+        ((sw_failed++)) || true
         local t_task="${sw_tasks[$s]}"
         local t_issue="${t_task%%:*}"
-        printf "  ${RED}✗${RESET} Agent %d: %s ${DIM}(timed out)${RESET}\n" "${sw_agent_nums[$s]}" "${t_task:0:55}"
+        printf "  ${RED}✗${RESET} Slot %d: %s ${DIM}(timed out)${RESET}\n" "$((s + 1))" "${t_task:0:55}"
         release_issue "$t_issue"
         rm -f "${sw_status_files[$s]}" "${sw_output_files[$s]}" "${sw_log_files[$s]}"
         sw_pids[$s]=""
@@ -725,7 +736,7 @@ ${files_section:-No file changes captured}
   fi
 
   echo ""
-  echo "${BOLD}━━━ Window Complete (${sw_elapsed_fmt}) ━━━${RESET}"
+  echo "${BOLD}━━━ Round complete (${sw_elapsed_fmt}) ━━━${RESET}"
   echo "  ${GREEN}✓ $sw_done done${RESET}  ·  ${YELLOW}⊘ $sw_failed blocked/failed${RESET}  ·  ${DIM}$total_tasks total${RESET}"
 
   # Check remaining tasks
@@ -739,478 +750,5 @@ ${files_section:-No file changes captured}
   fi
 
   [[ "$sw_any_failed" == true ]] && return 1
-  return 0
-}
-run_parallel_tasks() {
-  log_info "Running ${BOLD}$MAX_PARALLEL parallel agents${RESET} (each in isolated worktree)..."
-
-  local all_tasks=()
-
-  # Get all pending tasks
-  while IFS= read -r task; do
-    [[ -n "$task" ]] && all_tasks+=("$task")
-  done < <(get_all_tasks)
-
-  if [[ ${#all_tasks[@]} -eq 0 ]]; then
-    log_info "No tasks to run"
-    return 2
-  fi
-
-  local total_tasks=${#all_tasks[@]}
-  log_info "Found $total_tasks tasks to process"
-
-  # Store original directory for git operations from subshells
-  ORIGINAL_DIR=$(pwd)
-  export ORIGINAL_DIR
-
-  # Set up worktree base directory
-  WORKTREE_BASE=$(mktemp -d)
-  export WORKTREE_BASE
-  log_debug "Worktree base: $WORKTREE_BASE"
-
-  # Ensure we have a base branch set
-  if [[ -z "$BASE_BRANCH" ]]; then
-    BASE_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-  fi
-  export BASE_BRANCH
-  guardrail_validate_base_branch
-  log_info "Base branch: $BASE_BRANCH"
-
-  # Export variables needed by subshell agents
-  export AI_ENGINE MAX_RETRIES RETRY_DELAY PRD_SOURCE PRD_FILE CREATE_PR PR_DRAFT
-
-  local batch_num=0
-  local completed_branches=()
-  local any_failed=false
-  local groups=("all")
-
-  if [[ "$PRD_SOURCE" == "yaml" ]]; then
-    groups=()
-    while IFS= read -r group; do
-      [[ -n "$group" ]] && groups+=("$group")
-    done < <(yq -r '.tasks[] | select(.completed != true) | (.parallel_group // 0)' "$PRD_FILE" 2>/dev/null | sort -n | uniq)
-  fi
-
-  for group in "${groups[@]}"; do
-    local tasks=()
-    local group_label=""
-
-    if [[ "$PRD_SOURCE" == "yaml" ]]; then
-      while IFS= read -r task; do
-        [[ -n "$task" ]] && tasks+=("$task")
-      done < <(get_tasks_in_group_yaml "$group")
-      [[ ${#tasks[@]} -eq 0 ]] && continue
-      group_label=" (group $group)"
-    else
-      tasks=("${all_tasks[@]}")
-    fi
-
-    local batch_start=0
-    local total_group_tasks=${#tasks[@]}
-
-    while [[ $batch_start -lt $total_group_tasks ]]; do
-      ((batch_num++))
-      local batch_end=$((batch_start + MAX_PARALLEL))
-      [[ $batch_end -gt $total_group_tasks ]] && batch_end=$total_group_tasks
-      local batch_size=$((batch_end - batch_start))
-
-      echo ""
-      echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-      echo "${BOLD}Batch $batch_num${group_label}: Spawning $batch_size parallel agents${RESET}"
-      echo "${DIM}Each agent runs in its own git worktree with isolated workspace${RESET}"
-      echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-      echo ""
-
-      # Setup arrays for this batch
-      parallel_pids=()
-      local batch_tasks=()
-      local status_files=()
-      local output_files=()
-      local log_files=()
-
-      # Start all agents in the batch
-      for ((i = batch_start; i < batch_end; i++)); do
-        local task="${tasks[$i]}"
-        local agent_num=$((iteration + 1))
-        ((iteration++))
-
-        local status_file=$(mktemp)
-        local output_file=$(mktemp)
-        local log_file=$(mktemp)
-
-        batch_tasks+=("$task")
-        status_files+=("$status_file")
-        output_files+=("$output_file")
-        log_files+=("$log_file")
-
-        echo "waiting" > "$status_file"
-
-        # Show initial status
-        printf "  ${CYAN}◉${RESET} Agent %d: %s
-" "$agent_num" "${task:0:50}"
-
-        # Run agent in background
-        (
-          run_parallel_agent "$task" "$agent_num" "$output_file" "$status_file" "$log_file"
-        ) &
-        parallel_pids+=($!)
-      done
-
-      echo ""
-
-      # Monitor progress with a spinner
-      local spinner_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-      local spin_idx=0
-      local start_time=$SECONDS
-
-      while true; do
-        # Check if all processes are done
-        local all_done=true
-        local setting_up=0
-        local running=0
-        local done_count=0
-        local failed_count=0
-
-        for ((j = 0; j < batch_size; j++)); do
-          local pid="${parallel_pids[$j]}"
-          local status_file="${status_files[$j]}"
-          local status=$(cat "$status_file" 2>/dev/null || echo "waiting")
-
-          case "$status" in
-            "setting up")
-              all_done=false
-              ((setting_up++))
-              ;;
-            running)
-              all_done=false
-              ((running++))
-              ;;
-            done)
-              ((done_count++))
-              ;;
-            failed)
-              ((failed_count++))
-              ;;
-            *)
-              # Check if process is still running
-              if kill -0 "$pid" 2>/dev/null; then
-                all_done=false
-              fi
-              ;;
-          esac
-        done
-
-        [[ "$all_done" == true ]] && break
-
-        # Update spinner
-        local elapsed=$((SECONDS - start_time))
-        local spin_char="${spinner_chars:$spin_idx:1}"
-        spin_idx=$(( (spin_idx + 1) % ${#spinner_chars} ))
-
-        printf "  ${CYAN}%s${RESET} Agents: ${BLUE}%d setup${RESET} | ${YELLOW}%d running${RESET} | ${GREEN}%d done${RESET} | ${RED}%d failed${RESET} | %02d:%02d " \
-          "$spin_char" "$setting_up" "$running" "$done_count" "$failed_count" $((elapsed / 60)) $((elapsed % 60))
-
-        sleep 0.3
-      done
-
-      # Clear the spinner line
-      printf "%100s" ""
-
-      # Wait for all processes to fully complete
-      for pid in "${parallel_pids[@]}"; do
-        wait "$pid" 2>/dev/null || true
-      done
-
-      # Show final status for this batch
-      echo ""
-      echo "${BOLD}Batch $batch_num Results:${RESET}"
-      for ((j = 0; j < batch_size; j++)); do
-        local task="${batch_tasks[$j]}"
-        local status_file="${status_files[$j]}"
-        local output_file="${output_files[$j]}"
-        local log_file="${log_files[$j]}"
-        local status=$(cat "$status_file" 2>/dev/null || echo "unknown")
-        local agent_num=$((iteration - batch_size + j + 1))
-
-        local icon color branch_info=""
-        case "$status" in
-          done)
-            icon="✓"
-            color="$GREEN"
-            ((session_processed++))
-            # Collect tokens and branch name
-            local output_data=$(cat "$output_file" 2>/dev/null || echo "0 0")
-            local in_tok=$(echo "$output_data" | awk '{print $1}')
-            local out_tok=$(echo "$output_data" | awk '{print $2}')
-            local branch=$(echo "$output_data" | awk '{print $3}')
-            [[ "$in_tok" =~ ^[0-9]+$ ]] || in_tok=0
-            [[ "$out_tok" =~ ^[0-9]+$ ]] || out_tok=0
-            total_input_tokens=$((total_input_tokens + in_tok))
-            total_output_tokens=$((total_output_tokens + out_tok))
-            if [[ -n "$branch" ]]; then
-              completed_branches+=("$branch")
-              branch_info=" → ${CYAN}$branch${RESET}"
-            fi
-
-            # Mark task complete in PRD
-            if [[ "$PRD_SOURCE" == "markdown" ]]; then
-              mark_task_complete_markdown "$task"
-            elif [[ "$PRD_SOURCE" == "yaml" ]]; then
-              mark_task_complete_yaml "$task"
-            elif [[ "$PRD_SOURCE" == "github" ]]; then
-              # Build completion comment for parallel agent
-              local parallel_comment="## Task Completed by Ralphy (Parallel Agent $agent_num)
-
-**Branch:** \`$branch\`
-**Engine:** ${AI_ENGINE}
-
-Implementation completed successfully. See branch for commit details."
-              mark_task_complete_github "$task" "$parallel_comment"
-              project_board_task_completed "$task" "$branch"
-            fi
-            ;;
-          blocked:*)
-            icon="⊘"
-            color="$YELLOW"
-            local block_reason="${status#blocked:}"
-            mark_issue_blocked "$task" "$block_reason"
-            branch_info=" ${DIM}(blocked)${RESET}"
-            ;;
-          failed)
-            icon="✗"
-            color="$RED"
-            any_failed=true
-            if [[ -s "$log_file" ]]; then
-              branch_info=" ${DIM}(error below)${RESET}"
-            fi
-            ;;
-          *)
-            icon="?"
-            color="$YELLOW"
-            ;;
-        esac
-
-        printf "  ${color}%s${RESET} Agent %d: %s%s
-" "$icon" "$agent_num" "${task:0:45}" "$branch_info"
-
-        # Show log for failed agents
-        if [[ "$status" == "failed" ]] && [[ -s "$log_file" ]]; then
-          echo "${DIM}    ┌─ Agent $agent_num log:${RESET}"
-          sed 's/^/    │ /' "$log_file" | head -20
-          local log_lines=$(wc -l < "$log_file")
-          if [[ $log_lines -gt 20 ]]; then
-            echo "${DIM}    │ ... ($((log_lines - 20)) more lines)${RESET}"
-          fi
-          echo "${DIM}    └─${RESET}"
-        fi
-
-        # Cleanup temp files
-        rm -f "$status_file" "$output_file" "$log_file"
-      done
-
-      batch_start=$batch_end
-
-      # Check if we've hit max iterations
-      if [[ $MAX_ITERATIONS -gt 0 ]] && [[ $iteration -ge $MAX_ITERATIONS ]]; then
-        log_warn "Reached max iterations ($MAX_ITERATIONS)"
-        break
-      fi
-    done
-
-    if [[ $MAX_ITERATIONS -gt 0 ]] && [[ $iteration -ge $MAX_ITERATIONS ]]; then
-      break
-    fi
-  done
-
-  # Cleanup worktree base
-  if ! find "$WORKTREE_BASE" -maxdepth 1 -type d -name 'agent-*' -print -quit 2>/dev/null | grep -q .; then
-    rm -rf "$WORKTREE_BASE" 2>/dev/null || true
-  else
-    log_warn "Preserving worktree base with dirty agents: $WORKTREE_BASE"
-  fi
-
-  # Handle completed branches
-  if [[ ${#completed_branches[@]} -gt 0 ]]; then
-    echo ""
-    echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-
-    if [[ "$CREATE_PR" == true ]]; then
-      # PRs were created, just show the branches
-      echo "${BOLD}Branches created by agents:${RESET}"
-      for branch in "${completed_branches[@]}"; do
-        echo "  ${CYAN}•${RESET} $branch"
-      done
-    else
-      # Auto-merge branches back to main
-      echo "${BOLD}Merging agent branches into ${BASE_BRANCH}...${RESET}"
-      echo ""
-
-      if ! git checkout "$BASE_BRANCH" >/dev/null 2>&1; then
-        log_warn "Could not checkout $BASE_BRANCH; leaving agent branches unmerged."
-        echo "${BOLD}Branches created by agents:${RESET}"
-        for branch in "${completed_branches[@]}"; do
-          echo "  ${CYAN}•${RESET} $branch"
-        done
-        return 0
-      fi
-
-      local merge_failed=()
-
-      for branch in "${completed_branches[@]}"; do
-        printf "  Merging ${CYAN}%s${RESET}..." "$branch"
-
-        # Attempt to merge
-        if git merge --no-edit "$branch" >/dev/null 2>&1; then
-          # Verify merge actually landed commits before deleting branch
-          if guardrail_verify_merge "$branch"; then
-            printf " ${GREEN}✓${RESET}
-"
-            git branch -d "$branch" >/dev/null 2>&1 || true
-          else
-            printf " ${YELLOW}merge verified failed${RESET}
-"
-            log_warn "Merge verification failed for $branch — branch preserved"
-          fi
-        else
-          printf " ${YELLOW}conflict${RESET}"
-          merge_failed+=("$branch")
-          guardrail_update_branch "$branch" "failed"
-          # Don't abort yet - try AI resolution
-        fi
-      done
-
-      # Use AI to resolve merge conflicts
-      if [[ ${#merge_failed[@]} -gt 0 ]]; then
-        echo ""
-        echo "${BOLD}Using AI to resolve ${#merge_failed[@]} merge conflict(s)...${RESET}"
-        echo ""
-
-        local still_failed=()
-
-        for branch in "${merge_failed[@]}"; do
-          printf "  Resolving ${CYAN}%s${RESET}..." "$branch"
-
-          # Get list of conflicted files
-          local conflicted_files
-          conflicted_files=$(git diff --name-only --diff-filter=U 2>/dev/null)
-
-          if [[ -z "$conflicted_files" ]]; then
-            # No conflicts found (maybe already resolved or aborted)
-            git merge --abort 2>/dev/null || true
-            git merge --no-edit "$branch" >/dev/null 2>&1 || {
-              printf " ${RED}✗${RESET}
-"
-              still_failed+=("$branch")
-              guardrail_update_branch "$branch" "failed"
-              git merge --abort 2>/dev/null || true
-              continue
-            }
-            if guardrail_verify_merge "$branch"; then
-              printf " ${GREEN}✓${RESET}
-"
-              git branch -d "$branch" >/dev/null 2>&1 || true
-            else
-              printf " ${YELLOW}verify failed${RESET}
-"
-            fi
-            continue
-          fi
-
-          # Build prompt for AI to resolve conflicts
-          local resolve_prompt="You are resolving a git merge conflict. The following files have conflicts:
-
-$conflicted_files
-
-For each conflicted file:
-1. Read the file to see the conflict markers (<<<<<<< HEAD, =======, >>>>>>> branch)
-2. Understand what both versions are trying to do
-3. Edit the file to resolve the conflict by combining both changes intelligently
-4. Remove all conflict markers
-5. Make sure the resulting code is valid and compiles
-
-After resolving all conflicts:
-1. Run 'git add' on each resolved file
-2. Run 'git commit --no-edit' to complete the merge
-
-Be careful to preserve functionality from BOTH branches. The goal is to integrate all features."
-
-          # Run AI to resolve conflicts
-          local resolve_tmpfile
-          resolve_tmpfile=$(mktemp)
-
-          case "$AI_ENGINE" in
-            opencode)
-              OPENCODE_PERMISSION='{"*":"allow"}' opencode run \
-                --format json \
-                "$resolve_prompt" > "$resolve_tmpfile" 2>&1
-              ;;
-            cursor)
-              agent --print --force \
-                --output-format stream-json \
-                "$resolve_prompt" > "$resolve_tmpfile" 2>&1
-              ;;
-            qwen)
-              qwen --output-format stream-json \
-                --approval-mode yolo \
-                -p "$resolve_prompt" > "$resolve_tmpfile" 2>&1
-              ;;
-            codex)
-              codex exec --full-auto \
-                --json \
-                "$resolve_prompt" > "$resolve_tmpfile" 2>&1
-              ;;
-            *)
-              claude --dangerously-skip-permissions \
-                -p "$resolve_prompt" \
-                --output-format stream-json > "$resolve_tmpfile" 2>&1
-              ;;
-          esac
-
-          rm -f "$resolve_tmpfile"
-
-          # Check if merge was completed
-          if ! git diff --name-only --diff-filter=U 2>/dev/null | grep -q .; then
-            # No more conflicts - merge succeeded
-            if guardrail_verify_merge "$branch"; then
-              printf " ${GREEN}✓ (AI resolved)${RESET}
-"
-              git branch -d "$branch" >/dev/null 2>&1 || true
-            else
-              printf " ${YELLOW}✓ (AI resolved, verify failed — branch preserved)${RESET}
-"
-            fi
-          else
-            # Still has conflicts
-            printf " ${RED}✗ (AI couldn't resolve)${RESET}
-"
-            still_failed+=("$branch")
-            guardrail_update_branch "$branch" "failed"
-            git merge --abort 2>/dev/null || true
-          fi
-        done
-
-        if [[ ${#still_failed[@]} -gt 0 ]]; then
-          echo ""
-          echo "${YELLOW}Some conflicts could not be resolved automatically:${RESET}"
-          for branch in "${still_failed[@]}"; do
-            echo "  ${YELLOW}•${RESET} $branch"
-          done
-          echo ""
-          echo "${DIM}Resolve conflicts manually: git merge <branch>${RESET}"
-        else
-          echo ""
-          echo "${GREEN}All branches merged successfully!${RESET}"
-        fi
-      else
-        echo ""
-        echo "${GREEN}All branches merged successfully!${RESET}"
-      fi
-    fi
-  fi
-
-  if [[ "$any_failed" == true ]]; then
-    return 1
-  fi
-
   return 0
 }

@@ -166,7 +166,7 @@ track_failed_task() {
   local consecutive=0
   for ((i=${#recent_failed_tasks[@]}-1; i>=0; i--)); do
     if [[ "${recent_failed_tasks[$i]}" == "$issue_num" ]]; then
-      ((consecutive++))
+      ((consecutive++)) || true
     else
       break  # Different issue, stop counting
     fi

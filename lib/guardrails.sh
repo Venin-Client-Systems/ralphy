@@ -90,7 +90,7 @@ guardrail_preflight() {
       local inst_branch
       inst_branch=$(echo "$instance" | jq -r '.base_branch // ""' 2>/dev/null || echo "")
       if [[ -n "$inst_branch" ]] && [[ "$inst_branch" == "${BASE_BRANCH:-}" ]]; then
-        ((same_branch_instances++))
+        ((same_branch_instances++)) || true
       fi
     done <<< "$other_instances"
 
@@ -177,7 +177,7 @@ guardrail_atomic_worktree() {
     cd "$ORIGINAL_DIR" || { echo "Failed to cd to $ORIGINAL_DIR" >&2; exit 1; }
 
     # Prune any stale worktrees first
-    git worktree prune >&2
+    git worktree prune >&2 2>/dev/null || true
 
     # Delete branch if it exists (force) — shouldn't with PID namespace, but be safe
     git branch -D "$branch_name" >&2 2>/dev/null || true
@@ -295,7 +295,7 @@ guardrail_post_run_audit() {
 
   while IFS= read -r branch; do
     [[ -z "$branch" ]] && continue
-    ((count++))
+    ((count++)) || true
     local commits
     commits=$(git rev-list --count "$branch" --not "$(git merge-base "$branch" HEAD 2>/dev/null || echo HEAD)" 2>/dev/null || echo "?")
     branch_list+="  ${YELLOW}*${RESET} $branch ($commits unique commit(s))\n"

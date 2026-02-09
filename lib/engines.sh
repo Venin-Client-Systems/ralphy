@@ -183,6 +183,13 @@ has_tool_usage() {
   if echo "$result" | grep -qE '"name":"(read|glob|grep|write|edit|patch|apply_patch|run_shell_command|shell|exec|bash|cmd)"'; then
     return 0
   fi
+  # Codex patterns
+  if echo "$result" | grep -qE '"type":"tool_call"'; then
+    return 0
+  fi
+  if echo "$result" | grep -qE '"function":\{[^}]*"name":"'; then
+    return 0
+  fi
 
   return 1
 }

@@ -129,7 +129,7 @@ run_single_task() {
 
     # Check for empty response
     if [[ -z "$result" ]]; then
-      ((retry_count++))
+      ((retry_count++)) || true
       log_error "Empty response (attempt $retry_count/$MAX_RETRIES)"
 
       # Empty responses after multiple retries may indicate rate limiting
@@ -156,7 +156,7 @@ run_single_task() {
     # Check for API errors
     local error_msg
     if ! error_msg=$(check_for_errors "$result"); then
-      ((retry_count++))
+      ((retry_count++)) || true
       log_error "API error: $error_msg (attempt $retry_count/$MAX_RETRIES)"
 
       # Check if this is a rate limit error and we have a fallback
@@ -290,7 +290,7 @@ ${response:-Task implementation completed successfully.}
 **Engine:** ${AI_ENGINE}"
         mark_task_complete "$current_task" "$completion_comment"
         project_board_task_completed "$current_task" "${branch_name:-}"
-        ((session_processed++))
+        ((session_processed++)) || true
       elif [[ "$no_code_ok" == true ]]; then
         # No code changes but issue allows it (decision/docs/chore)
         local completion_comment="## Task Completed by Ralphy
@@ -302,7 +302,7 @@ ${response:-Task completed (no code changes required).}
 **Engine:** ${AI_ENGINE}"
         mark_task_complete "$current_task" "$completion_comment"
         project_board_task_completed "$current_task" "${branch_name:-}"
-        ((session_processed++))
+        ((session_processed++)) || true
       elif [[ "$has_commits" == false ]]; then
         log_error "No new commit created; failing task and leaving issue open: $current_task"
         return_to_base_branch
@@ -316,7 +316,7 @@ ${response:-Task completed (no code changes required).}
     else
       # For markdown/yaml, the AI marks the task complete directly
       # We just need to track the session counter
-      ((session_processed++))
+      ((session_processed++)) || true
     fi
 
     # Create PR if requested

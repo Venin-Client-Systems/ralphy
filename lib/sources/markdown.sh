@@ -25,6 +25,9 @@ mark_task_complete_markdown() {
   # - NOT escape: { } ( ) + ? | (these are literal in BRE)
   local escaped_task
   escaped_task=$(printf '%s\n' "$task" | sed 's/[[\.*^$/]/\\&/g')
-  sed -i.bak "s/^- \[ \] ${escaped_task}/- [x] ${escaped_task}/" "$PRD_FILE"
+  # Replacement string also needs & escaped (references matched text in sed)
+  local escaped_replacement
+  escaped_replacement=$(printf '%s\n' "$task" | sed 's/[[\.*^$/&]/\\&/g')
+  sed -i.bak "s/^- \[ \] ${escaped_task}/- [x] ${escaped_replacement}/" "$PRD_FILE"
   rm -f "${PRD_FILE}.bak"
 }

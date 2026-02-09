@@ -83,7 +83,7 @@ show_instance_status() {
   local count=0
   while IFS= read -r instance; do
     [[ -z "$instance" ]] && continue
-    ((count++))
+    ((count++)) || true
 
     local pid label issues started
     pid=$(echo "$instance" | jq -r '.pid')
@@ -131,7 +131,7 @@ release_issue() {
   for i in "${CLAIMED_ISSUES[@]}"; do
     [[ "$i" != "$issue_num" ]] && new_claimed+=("$i")
   done
-  CLAIMED_ISSUES=("${new_claimed[@]}")
+  CLAIMED_ISSUES=("${new_claimed[@]+"${new_claimed[@]}"}")
 
   # Update lock file
   if [[ -n "$RALPHY_LOCK_FILE" ]] && [[ -f "$RALPHY_LOCK_FILE" ]]; then

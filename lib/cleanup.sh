@@ -40,10 +40,10 @@ reap_orphaned_processes() {
     children=$(pgrep -P "$pid" 2>/dev/null || true)
     for child in $children; do
       kill -TERM "$child" 2>/dev/null || true
-      ((killed++))
+      ((killed++)) || true
     done
     kill -TERM "$pid" 2>/dev/null || true
-    ((killed++))
+    ((killed++)) || true
   done < <(ps -eo pid,ppid,args 2>/dev/null | grep -E 'tsc|eslint' | grep -v grep || true)
 
   # Also find node processes whose parent is a dead npm/tsc process (reparented to 1)
@@ -69,7 +69,7 @@ reap_orphaned_processes() {
     # Check if its original parent was tsc/eslint by looking at the command
     if [[ "$cmdline" == *"node"* ]]; then
       kill -TERM "$pid" 2>/dev/null || true
-      ((killed++))
+      ((killed++)) || true
     fi
   done < <(ps -eo pid,ppid,rss,args 2>/dev/null | grep -E '^\s*[0-9]+\s+1\s+[0-9]+\s+.*node' | grep -v grep || true)
 
@@ -89,10 +89,10 @@ reap_orphaned_processes() {
     children=$(pgrep -P "$pid" 2>/dev/null || true)
     for child in $children; do
       kill -TERM "$child" 2>/dev/null || true
-      ((killed++))
+      ((killed++)) || true
     done
     kill -TERM "$pid" 2>/dev/null || true
-    ((killed++))
+    ((killed++)) || true
   done < <(ps -eo pid,ppid,args 2>/dev/null | grep "shell-snapshots" | grep -v grep || true)
 
   if [[ $killed -gt 0 ]]; then
@@ -114,6 +114,9 @@ get_all_descendants() {
 }
 
 cleanup() {
+  # Prevent re-entry on double Ctrl+C
+  trap - EXIT INT TERM HUP
+
   local exit_code=$?
 
   # Kill background processes and their entire process trees

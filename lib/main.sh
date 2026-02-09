@@ -70,7 +70,8 @@ main() {
   # Run in parallel or sequential mode
   if [[ "$PARALLEL" == true ]]; then
     local parallel_code=0
-    run_parallel_tasks || parallel_code=$?
+    AUTO_PARALLEL_MAX=$MAX_PARALLEL
+    run_auto_parallel_batch || parallel_code=$?
     if [[ $parallel_code -eq 2 ]]; then
       show_summary
       notify_done
