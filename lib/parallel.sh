@@ -556,7 +556,7 @@ run_auto_parallel_batch() {
 
   # --- Sliding window loop ---
   local stuck_warned=false
-  local PARALLEL_TIMEOUT_SECS=1800  # 30 minutes max
+  local PARALLEL_TIMEOUT_SECS=2700  # 45 minutes max
   local STUCK_WARNING_SECS=900      # Warn after 15 minutes
 
   while [[ $sw_active -gt 0 ]]; do

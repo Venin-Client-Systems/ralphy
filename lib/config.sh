@@ -87,7 +87,7 @@ RALPHY_LOCK_DIR="${HOME}/.ralphy/instances"
 RALPHY_LOCK_FILE=""
 declare -a CLAIMED_ISSUES=()      # Issues claimed by THIS instance
 AUTO_PARALLEL=true                # Enable smart auto-parallelism
-AUTO_PARALLEL_MAX=3               # Max parallel when auto-detecting safe pairs
+AUTO_PARALLEL_MAX=2               # Max parallel when auto-detecting safe pairs
 
 # GitHub Project Board integration
 PROJECT_BOARD_NUM=""              # Project board number (e.g., 2)
