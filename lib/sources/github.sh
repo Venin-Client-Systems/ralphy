@@ -42,14 +42,14 @@ mark_task_complete_github() {
 
   # Add completion comment before closing (required)
   if [[ -n "$comment" ]]; then
-    gh issue comment "$issue_num" --repo "$GITHUB_REPO" --body "$comment" 2>/dev/null || true
+    gh issue comment "$issue_num" --repo "$GITHUB_REPO" --body "$comment" >/dev/null 2>/dev/null || true
   else
     # Default comment if none provided
-    gh issue comment "$issue_num" --repo "$GITHUB_REPO" --body "Task completed by Ralphy automated workflow." 2>/dev/null || true
+    gh issue comment "$issue_num" --repo "$GITHUB_REPO" --body "Task completed by Ralphy automated workflow." >/dev/null 2>/dev/null || true
   fi
 
   # Now close the issue
-  gh issue close "$issue_num" --repo "$GITHUB_REPO" 2>/dev/null || true
+  gh issue close "$issue_num" --repo "$GITHUB_REPO" >/dev/null 2>/dev/null || true
 
   # Remove from blocked arrays — if a prior attempt was blocked but this one
   # succeeded, the issue isn't actually blocked anymore
@@ -96,7 +96,7 @@ mark_issue_blocked() {
 
   # Add ralphy-blocked label to the issue
   if [[ "$PRD_SOURCE" == "github" ]] && [[ -n "$GITHUB_REPO" ]]; then
-    gh issue edit "$issue_num" --repo "$GITHUB_REPO" --add-label "ralphy-blocked" 2>/dev/null || true
+    gh issue edit "$issue_num" --repo "$GITHUB_REPO" --add-label "ralphy-blocked" >/dev/null 2>/dev/null || true
     gh issue comment "$issue_num" --repo "$GITHUB_REPO" --body "## Ralphy Blocked
 
 **Reason:** $reason
@@ -106,7 +106,7 @@ This issue was skipped by Ralphy and needs manual review.
 **To unblock:**
 - If no code changes are needed, add one of these labels: \`chore\`, \`documentation\`, \`decision\`, \`no-code-required\`
 - Remove the \`ralphy-blocked\` label
-- Re-run ralphy" 2>/dev/null || true
+- Re-run ralphy" >/dev/null 2>/dev/null || true
   fi
 
   # Update project board status to Blocked
@@ -140,7 +140,7 @@ auto_label_docs_issue() {
     # Check if it already has a no-code-required label
     if ! issue_allows_no_code "$task"; then
       log_info "Auto-adding 'documentation' label to docs issue #$issue_num"
-      gh issue edit "$issue_num" --repo "$GITHUB_REPO" --add-label "documentation" 2>/dev/null || true
+      gh issue edit "$issue_num" --repo "$GITHUB_REPO" --add-label "documentation" >/dev/null 2>/dev/null || true
       return 0
     fi
   fi

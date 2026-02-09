@@ -230,10 +230,10 @@ project_board_task_started() {
   local issue_num="${task%%:*}"
   if [[ -z "$PROJECT_NODE_ID" ]]; then return 0; fi
 
-  # Add to board, set status, set batch label
-  project_board_set_status "$issue_num" "In Progress" &
+  # Add to board, set status, set batch label (suppress stdout to avoid clobbering spinner)
+  project_board_set_status "$issue_num" "In Progress" >/dev/null &
   if [[ -n "$GITHUB_LABEL" ]]; then
-    project_board_set_batch "$issue_num" "$GITHUB_LABEL" &
+    project_board_set_batch "$issue_num" "$GITHUB_LABEL" >/dev/null &
   fi
   wait
 }
@@ -246,9 +246,9 @@ project_board_task_completed() {
   local issue_num="${task%%:*}"
   if [[ -z "$PROJECT_NODE_ID" ]]; then return 0; fi
 
-  project_board_set_status "$issue_num" "Done" &
+  project_board_set_status "$issue_num" "Done" >/dev/null &
   if [[ -n "$branch_name" ]]; then
-    project_board_set_branch "$issue_num" "$branch_name" &
+    project_board_set_branch "$issue_num" "$branch_name" >/dev/null &
   fi
   wait
 }
@@ -261,9 +261,9 @@ project_board_task_in_review() {
   local issue_num="${task%%:*}"
   if [[ -z "$PROJECT_NODE_ID" ]]; then return 0; fi
 
-  project_board_set_status "$issue_num" "In Review" &
+  project_board_set_status "$issue_num" "In Review" >/dev/null &
   if [[ -n "$branch_name" ]]; then
-    project_board_set_branch "$issue_num" "$branch_name" &
+    project_board_set_branch "$issue_num" "$branch_name" >/dev/null &
   fi
   wait
 }

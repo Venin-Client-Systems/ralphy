@@ -457,6 +457,8 @@ run_auto_parallel_batch() {
   local stuck_warned=false
   local PARALLEL_TIMEOUT_SECS=1800  # 30 minutes max
   local STUCK_WARNING_SECS=900      # Warn after 15 minutes
+  local last_status_print=0         # Timestamp of last newline status print
+  local STATUS_PRINT_INTERVAL=30    # Print a persistent status line every 30s
 
   while [[ $sw_active -gt 0 ]]; do
     # Check each slot for completion
@@ -666,6 +668,15 @@ ${files_section:-No file changes captured}
     local queued=$(( total_tasks - sw_started ))
     [[ $queued -lt 0 ]] && queued=0
 
+    # Periodic persistent status line (newline-based, can't be clobbered)
+    if [[ $((elapsed - last_status_print)) -ge $STATUS_PRINT_INTERVAL ]]; then
+      last_status_print=$elapsed
+      printf "\r%80s\r" ""
+      printf "  ${DIM}[%02d:%02d]${RESET} Running: ${CYAN}%d${RESET} | Done: ${GREEN}%d${RESET} | Failed: ${RED}%d${RESET} | Queued: %d\n" \
+        $((elapsed / 60)) $((elapsed % 60)) "$sw_active" "$sw_done" "$sw_failed" "$queued"
+    fi
+
+    # In-place spinner (fast update between persistent lines)
     printf "\r  ${CYAN}%s${RESET} Running: %d | Done: %d | Failed: %d | Queued: %d | %02d:%02d " \
       "$spin_char" "$sw_active" "$sw_done" "$sw_failed" "$queued" \
       $((elapsed / 60)) $((elapsed % 60))
