@@ -207,6 +207,14 @@ cleanup() {
     fi
   fi
 
+  # Restore auto-stashed changes
+  if [[ "${RALPHY_AUTO_STASHED:-false}" == true ]]; then
+    if git stash list 2>/dev/null | head -1 | grep -q "ralphy-auto-stash-${RALPHY_PID}"; then
+      git stash pop --quiet 2>/dev/null && log_info "Restored stashed changes" || log_warn "Failed to restore stash — run 'git stash pop' manually"
+    fi
+    RALPHY_AUTO_STASHED=false
+  fi
+
   # Show message on interrupt
   if [[ $exit_code -eq 130 ]]; then
     printf "\n"
