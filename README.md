@@ -1,7 +1,5 @@
 # Ralphy
 
-![Ralphy](assets/ralphy.jpeg)
-
 An autonomous AI coding loop that processes GitHub issues (or PRD files) by spawning AI agents — Claude Code, OpenCode, Codex, Cursor, or Qwen — in isolated git worktrees until everything is done.
 
 ## Why Ralphy?
