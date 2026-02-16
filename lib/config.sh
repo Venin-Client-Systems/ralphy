@@ -22,6 +22,7 @@ MAX_ITERATIONS=0  # 0 = unlimited
 MAX_RETRIES=3
 RETRY_DELAY=5
 VERBOSE=false
+RALPHY_AUTO_STASHED=false
 
 # Git branch options
 BRANCH_PER_TASK=false

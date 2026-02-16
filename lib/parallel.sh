@@ -644,18 +644,43 @@ ${files_section:-No file changes captured}
             current_head=$(git -C "$ORIGINAL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
             if [[ "$current_head" != "$BASE_BRANCH" ]]; then
               log_warn "Expected $BASE_BRANCH but on $current_head — skipping merge of $branch"
-            elif git -C "$ORIGINAL_DIR" merge --no-edit "$branch" >/dev/null 2>&1; then
-              log_debug "Merged $branch into $BASE_BRANCH"
-              # Verify merge actually landed commits before deleting branch
-              if guardrail_verify_merge "$branch" "$ORIGINAL_DIR"; then
-                git -C "$ORIGINAL_DIR" branch -d "$branch" >/dev/null 2>&1 || true
-              else
-                log_warn "Merge verification failed for $branch — branch preserved"
-              fi
             else
-              log_warn "Merge conflict merging $branch into $BASE_BRANCH — aborting merge, branch preserved for manual resolution"
-              git -C "$ORIGINAL_DIR" merge --abort 2>/dev/null || true
-              guardrail_update_branch "$branch" "failed"
+              # Stash uncommitted bookkeeping files before merge to prevent
+              # "Your local changes would be overwritten" errors
+              local stash_created=false
+              local stash_status
+              stash_status=$(git -C "$ORIGINAL_DIR" status --porcelain -- progress.txt RALPHY_LESSONS.md 2>/dev/null || true)
+              if [[ -n "$stash_status" ]]; then
+                if git -C "$ORIGINAL_DIR" stash push -m "ralphy-pre-merge-$$" -- progress.txt RALPHY_LESSONS.md >/dev/null 2>&1; then
+                  stash_created=true
+                  log_debug "Stashed bookkeeping files before merge"
+                fi
+              fi
+
+              if git -C "$ORIGINAL_DIR" merge --no-edit "$branch" >/dev/null 2>&1; then
+                log_debug "Merged $branch into $BASE_BRANCH"
+
+                # Restore stashed bookkeeping files after successful merge
+                if [[ "$stash_created" == true ]]; then
+                  git -C "$ORIGINAL_DIR" stash pop --quiet 2>/dev/null || true
+                fi
+
+                # Verify merge actually landed commits before deleting branch
+                if guardrail_verify_merge "$branch" "$ORIGINAL_DIR"; then
+                  git -C "$ORIGINAL_DIR" branch -d "$branch" >/dev/null 2>&1 || true
+                else
+                  log_warn "Merge verification failed for $branch — branch preserved"
+                fi
+              else
+                # Restore stashed bookkeeping files on merge failure too
+                if [[ "$stash_created" == true ]]; then
+                  git -C "$ORIGINAL_DIR" stash pop --quiet 2>/dev/null || true
+                fi
+
+                log_warn "Merge conflict merging $branch into $BASE_BRANCH — aborting merge, branch preserved for manual resolution"
+                git -C "$ORIGINAL_DIR" merge --abort 2>/dev/null || true
+                guardrail_update_branch "$branch" "failed"
+              fi
             fi
           fi
           ;;

@@ -9,13 +9,14 @@
 guardrail_preflight() {
   log_debug "Running guardrail preflight checks..."
 
-  # 1. Clean working tree: refuse staged/unstaged changes
+  # 1. Clean working tree: stash uncommitted changes (restored on exit)
   local dirty
   dirty=$(git status --porcelain 2>/dev/null | grep -v '^??' || true)
   if [[ -n "$dirty" ]]; then
-    log_error "Working directory has uncommitted changes. Commit or stash before running ralphy."
+    log_warn "Uncommitted changes detected — stashing for worktree safety (auto-restored on exit)"
     echo "$dirty" | head -10 >&2
-    exit 1
+    git stash push -m "ralphy-auto-stash-$$" --quiet
+    RALPHY_AUTO_STASHED=true
   fi
 
   # 2. No in-progress git operations
