@@ -67,6 +67,7 @@ run_single_task() {
     rm -f "$tmpfile"
     tmpfile=""
     return_to_base_branch
+    cleanup_failed_branch "$branch_name"
     return 0
   fi
 
@@ -150,6 +151,7 @@ run_single_task() {
       rm -f "$tmpfile"
       tmpfile=""
       return_to_base_branch
+      cleanup_failed_branch "$branch_name"
       return 1
     fi
 
@@ -178,6 +180,7 @@ run_single_task() {
       rm -f "$tmpfile"
       tmpfile=""
       return_to_base_branch
+      cleanup_failed_branch "$branch_name"
       return 1
     fi
 
@@ -195,6 +198,7 @@ run_single_task() {
         CODEX_LAST_MESSAGE_FILE=""
       fi
       return_to_base_branch
+      cleanup_failed_branch "$branch_name"
       return 4
     fi
 
@@ -207,6 +211,7 @@ run_single_task() {
         CODEX_LAST_MESSAGE_FILE=""
       fi
       return_to_base_branch
+      cleanup_failed_branch "$branch_name"
       return 4
     fi
 
@@ -306,11 +311,13 @@ ${response:-Task completed (no code changes required).}
       elif [[ "$has_commits" == false ]]; then
         log_error "No new commit created; failing task and leaving issue open: $current_task"
         return_to_base_branch
+        cleanup_failed_branch "$branch_name"
         return 3
       else
         log_error "No code changes detected (docs/progress only); failing task and leaving issue open: $current_task"
         log_info "Tip: Add 'no-code-required', 'chore', 'documentation', or 'decision' label to allow closing without code"
         return_to_base_branch
+        cleanup_failed_branch "$branch_name"
         return 3
       fi
     else
@@ -331,6 +338,11 @@ ${response:-Task completed (no code changes required).}
     # Return to base branch
     return_to_base_branch
 
+    # Merge task branch into base and delete it (skipped if CREATE_PR=true)
+    if [[ "$BRANCH_PER_TASK" == true ]] && [[ -n "$branch_name" ]]; then
+      merge_and_cleanup_branch "$branch_name"
+    fi
+
     # Check for completion - verify by actually counting remaining tasks
     local remaining_count
     remaining_count=$(count_remaining_tasks | tr -d '[:space:]')
@@ -350,5 +362,6 @@ ${response:-Task completed (no code changes required).}
   done
 
   return_to_base_branch
+  cleanup_failed_branch "$branch_name"
   return 1
 }
