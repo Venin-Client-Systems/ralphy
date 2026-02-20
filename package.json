@@ -1,0 +1,49 @@
+{
+  "name": "@venin/autoissue",
+  "version": "2.0.0",
+  "description": "Turn your GitHub backlog into pull requests, overnight",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Venin-Client-Systems/autoissue.git"
+  },
+  "keywords": [
+    "ai",
+    "github",
+    "automation",
+    "parallel",
+    "claude",
+    "cli",
+    "issues",
+    "autoissue"
+  ],
+  "bin": {
+    "autoissue": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/index.js",
+    "dev": "tsx index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'Tests coming soon'"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "lru-cache": "^11.2.6",
+    "nanoid": "^5.1.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.11",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
