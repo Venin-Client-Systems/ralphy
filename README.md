@@ -1,8 +1,8 @@
-# Ralphy 2.0
+# Autoissue 2.0
 
 **Turn your GitHub backlog into pull requests, overnight.**
 
-Ralphy is a parallel AI code execution engine that processes GitHub issues with domain-aware scheduling.
+Autoissue is a parallel AI code execution engine that processes GitHub issues with domain-aware scheduling.
 
 ## Quick Start
 
@@ -17,7 +17,7 @@ npm run build
 npm link
 
 # Run
-ralphy --issues ralphy-1
+autoissue --issues autoissue-1
 ```
 
 ## Architecture
@@ -49,15 +49,15 @@ Pull Requests
 ### Direct Mode (Process Issues by Label)
 
 ```bash
-ralphy --issues ralphy-1
+autoissue --issues autoissue-1
 ```
 
-Fetches all open issues labeled `ralphy-1`, classifies their domains, and processes them in parallel.
+Fetches all open issues labeled `autoissue-1`, classifies their domains, and processes them in parallel.
 
 ### Planner Mode (Directive → Issues)
 
 ```bash
-ralphy --directive "Build JWT authentication with refresh tokens"
+autoissue --directive "Build JWT authentication with refresh tokens"
 ```
 
 Uses AI to break the directive into GitHub issues, then processes them.
@@ -66,7 +66,7 @@ Uses AI to break the directive into GitHub issues, then processes them.
 
 ## Configuration
 
-Create `ralphy.config.json`:
+Create `autoissue.config.json`:
 
 ```json
 {
@@ -90,7 +90,7 @@ Create `ralphy.config.json`:
 }
 ```
 
-Or run without config - Ralphy auto-detects your git repository and uses sensible defaults.
+Or run without config - Autoissue auto-detects your git repository and uses sensible defaults.
 
 ## Development
 

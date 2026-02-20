@@ -1,5 +1,5 @@
 /**
- * Sliding Window Scheduler (ported from ralphy/lib/parallel.sh)
+ * Sliding Window Scheduler (ported from autoissue/lib/parallel.sh)
  *
  * Schedules tasks with domain-aware parallelization:
  * - Fixed number of slots (e.g., 3 concurrent tasks)

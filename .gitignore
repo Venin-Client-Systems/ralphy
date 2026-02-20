@@ -9,8 +9,8 @@ dist/
 logs/
 
 # Session data
-.ralphy/
-~/.ralphy/
+.autoissue/
+~/.autoissue/
 
 # Environment
 .env

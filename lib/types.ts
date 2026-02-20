@@ -1,5 +1,5 @@
 /**
- * Ralphy 2.0 - Type System
+ * Autoissue 2.0 - Type System
  *
  * Simplified from Echelon - removed layer hierarchy, kept the good parts:
  * - Agent validation schemas
@@ -166,9 +166,9 @@ export const DashboardConfigSchema = z.object({
 });
 
 /**
- * Root Ralphy configuration schema.
+ * Root Autoissue configuration schema.
  */
-export const RalphyConfigSchema = z.object({
+export const AutoissueConfigSchema = z.object({
   project: ProjectConfigSchema,
   executor: ExecutorConfigSchema.default({}),
   planner: PlannerConfigSchema.optional(),
@@ -178,7 +178,7 @@ export const RalphyConfigSchema = z.object({
   dashboard: DashboardConfigSchema.optional(),
 });
 
-export type RalphyConfig = z.infer<typeof RalphyConfigSchema>;
+export type AutoissueConfig = z.infer<typeof AutoissueConfigSchema>;
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 export type ExecutorConfig = z.infer<typeof ExecutorConfigSchema>;
 export type PlannerConfig = z.infer<typeof PlannerConfigSchema>;
@@ -273,7 +273,7 @@ export interface Task {
 export type SessionStatus = 'running' | 'paused' | 'completed' | 'failed';
 
 /**
- * Ralphy session state (persisted to disk).
+ * Autoissue session state (persisted to disk).
  */
 export interface SessionState {
   sessionId: string;
@@ -284,7 +284,7 @@ export interface SessionState {
   totalCost: number;
   startedAt: string;
   completedAt?: string;
-  config: RalphyConfig;
+  config: AutoissueConfig;
 }
 
 // --- Agent Response ---

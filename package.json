@@ -1,12 +1,12 @@
 {
-  "name": "@venin/ralphy",
+  "name": "@venin/autoissue",
   "version": "2.0.0",
   "description": "Turn your GitHub backlog into pull requests, overnight",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Venin-Client-Systems/ralphy.git"
+    "url": "https://github.com/Venin-Client-Systems/autoissue.git"
   },
   "keywords": [
     "ai",
@@ -14,10 +14,12 @@
     "automation",
     "parallel",
     "claude",
-    "cli"
+    "cli",
+    "issues",
+    "autoissue"
   ],
   "bin": {
-    "ralphy": "./dist/index.js"
+    "autoissue": "./dist/index.js"
   },
   "files": [
     "dist",
@@ -32,11 +34,12 @@
   },
   "dependencies": {
     "commander": "^13.1.0",
+    "lru-cache": "^11.2.6",
     "nanoid": "^5.1.2",
     "zod": "^3.24.2"
   },
   "devDependencies": {
-    "@types/node": "^22.13.4",
+    "@types/node": "^22.19.11",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3"
   },

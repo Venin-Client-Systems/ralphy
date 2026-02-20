@@ -1,22 +1,22 @@
 /**
  * Config Loader (simplified from Echelon)
  *
- * Loads and validates Ralphy configuration from:
+ * Loads and validates Autoissue configuration from:
  * 1. Explicit path (--config)
- * 2. Auto-discovery (./ralphy.config.json, git root, ~/.ralphy/)
+ * 2. Auto-discovery (./autoissue.config.json, git root, ~/.autoissue/)
  * 3. Generate defaults (if in git repo)
  */
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { RalphyConfig } from './types.js';
-import { RalphyConfigSchema } from './types.js';
+import type { AutoissueConfig } from './types.js';
+import { AutoissueConfigSchema } from './types.js';
 import { logger } from './logger.js';
 
 /**
  * Load config from a specific path.
  */
-export function loadConfig(path: string): RalphyConfig {
+export function loadConfig(path: string): AutoissueConfig {
   logger.debug('Loading config', { path });
 
   if (!existsSync(path)) {
@@ -26,7 +26,7 @@ export function loadConfig(path: string): RalphyConfig {
   try {
     const raw = readFileSync(path, 'utf-8');
     const json = JSON.parse(raw);
-    const config = RalphyConfigSchema.parse(json);
+    const config = AutoissueConfigSchema.parse(json);
 
     logger.info('Config loaded', { path });
     return config;
@@ -39,15 +39,15 @@ export function loadConfig(path: string): RalphyConfig {
  * Auto-discover config file.
  *
  * Searches in order:
- * 1. ./ralphy.config.json (current directory)
- * 2. <git-root>/ralphy.config.json
- * 3. ~/.ralphy/configs/<repo-name>.json
+ * 1. ./autoissue.config.json (current directory)
+ * 2. <git-root>/autoissue.config.json
+ * 3. ~/.autoissue/configs/<repo-name>.json
  *
  * Returns path if found, null otherwise.
  */
 export function discoverConfig(cwd: string = process.cwd()): string | null {
   // 1. Current directory
-  const localPath = join(cwd, 'ralphy.config.json');
+  const localPath = join(cwd, 'autoissue.config.json');
   if (existsSync(localPath)) {
     logger.debug('Config found in current directory', { path: localPath });
     return localPath;
@@ -57,7 +57,7 @@ export function discoverConfig(cwd: string = process.cwd()): string | null {
   try {
     const gitRoot = getGitRoot(cwd);
     if (gitRoot) {
-      const gitRootPath = join(gitRoot, 'ralphy.config.json');
+      const gitRootPath = join(gitRoot, 'autoissue.config.json');
       if (existsSync(gitRootPath)) {
         logger.debug('Config found in git root', { path: gitRootPath });
         return gitRootPath;
@@ -71,7 +71,7 @@ export function discoverConfig(cwd: string = process.cwd()): string | null {
   try {
     const repoName = getRepoName(cwd);
     if (repoName) {
-      const globalPath = join(process.env.HOME || '~', '.ralphy', 'configs', `${repoName}.json`);
+      const globalPath = join(process.env.HOME || '~', '.autoissue', 'configs', `${repoName}.json`);
       if (existsSync(globalPath)) {
         logger.debug('Config found in global directory', { path: globalPath });
         return globalPath;
@@ -87,7 +87,7 @@ export function discoverConfig(cwd: string = process.cwd()): string | null {
 /**
  * Generate default config for a git repository.
  */
-export function generateDefaultConfig(cwd: string = process.cwd()): RalphyConfig {
+export function generateDefaultConfig(cwd: string = process.cwd()): AutoissueConfig {
   const gitRoot = getGitRoot(cwd);
   if (!gitRoot) {
     throw new Error('Not in a git repository');
@@ -103,7 +103,7 @@ export function generateDefaultConfig(cwd: string = process.cwd()): RalphyConfig
     throw new Error(`Invalid git remote: ${remote}`);
   }
 
-  const config: RalphyConfig = {
+  const config: AutoissueConfig = {
     project: {
       repo,
       path: gitRoot,

@@ -1,7 +1,7 @@
 /**
  * CLI Argument Parser
  *
- * Uses Commander to parse command-line arguments for Ralphy 2.0.
+ * Uses Commander to parse command-line arguments for Autoissue 2.0.
  */
 
 import { Command } from 'commander';
@@ -14,13 +14,13 @@ export function parseArgs(argv: string[]): CliOptions {
   const program = new Command();
 
   program
-    .name('ralphy')
+    .name('autoissue')
     .description('Turn your GitHub backlog into pull requests, overnight')
     .version('2.0.0');
 
   // Options
   program
-    .option('-c, --config <path>', 'Path to ralphy.config.json')
+    .option('-c, --config <path>', 'Path to autoissue.config.json')
     .option('-d, --directive <text>', 'Directive to execute (planner mode)')
     .option('-i, --issues <label>', 'GitHub label to process (direct mode)')
     .option('--headless', 'Run without TUI', false)

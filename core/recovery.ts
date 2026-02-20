@@ -1,5 +1,5 @@
 import { logger } from '../lib/logger.js';
-import type { RalphyConfig, SessionState } from '../lib/types.js';
+import type { AutoissueConfig, SessionState } from '../lib/types.js';
 
 export interface RetryOptions {
   maxRetries: number;
@@ -66,7 +66,7 @@ export async function withRetry<T>(
 /** Check total budget */
 export function checkTotalBudget(
   state: SessionState,
-  config: RalphyConfig,
+  config: AutoissueConfig,
 ): { ok: boolean; remaining: number; spent: number; limit: number } {
   return {
     ok: state.totalCost < config.maxTotalBudgetUsd,
@@ -77,7 +77,7 @@ export function checkTotalBudget(
 }
 
 /** Get a budget summary string */
-export function budgetSummary(state: SessionState, config: RalphyConfig): string {
+export function budgetSummary(state: SessionState, config: AutoissueConfig): string {
   const { spent, limit, remaining } = checkTotalBudget(state, config);
   const pct = limit > 0 ? ((spent / limit) * 100).toFixed(1) : 0;
   return `Budget: $${spent.toFixed(2)}/$${limit.toFixed(2)} (${pct}% used, $${remaining.toFixed(2)} remaining)`;

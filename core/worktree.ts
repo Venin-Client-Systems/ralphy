@@ -1,5 +1,5 @@
 /**
- * Worktree Management (ported from ralphy/lib/worktree.sh)
+ * Worktree Management (ported from autoissue/lib/worktree.sh)
  *
  * Provides TypeScript API for git worktree operations with:
  * - Atomic creation with rollback on failure
@@ -36,7 +36,7 @@ export interface Worktree {
 export interface CreateWorktreeOptions {
   /** Base branch to branch off from (default: 'main') */
   baseBranch?: string;
-  /** Prefix for the worktree directory (default: 'ralphy-') */
+  /** Prefix for the worktree directory (default: 'autoissue-') */
   prefix?: string;
   /** Whether to force creation (delete existing) */
   force?: boolean;
@@ -60,7 +60,7 @@ export interface CreateWorktreeResult {
  * ```typescript
  * const { worktree, cleanup } = await createWorktree('feature/auth', {
  *   baseBranch: 'develop',
- *   prefix: 'ralphy-'
+ *   prefix: 'autoissue-'
  * });
  *
  * try {
@@ -77,7 +77,7 @@ export async function createWorktree(
 ): Promise<CreateWorktreeResult> {
   const {
     baseBranch = 'main',
-    prefix = 'ralphy-',
+    prefix = 'autoissue-',
     force = false,
   } = opts;
 

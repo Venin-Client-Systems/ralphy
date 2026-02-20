@@ -1,5 +1,5 @@
 /**
- * Domain Classification (ported from ralphy/lib/domain.sh)
+ * Domain Classification (ported from autoissue/lib/domain.sh)
  *
  * Classifies GitHub issues by domain for parallel scheduling:
  * - Tier 1: Title tags ([Backend], [Frontend], etc.)

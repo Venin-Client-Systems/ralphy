@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Ralphy 2.0 - Main Entry Point
+ * Autoissue 2.0 - Main Entry Point
  *
  * Turn your GitHub backlog into pull requests, overnight.
  */
@@ -49,7 +49,7 @@ async function main(): Promise<void> {
     // Execute based on mode
     if (cliOptions.issues) {
       // Direct mode: process issues by label
-      console.log(`\n🚀 Ralphy 2.0 - Processing issues labeled "${cliOptions.issues}"\n`);
+      console.log(`\n🚀 Autoissue 2.0 - Processing issues labeled "${cliOptions.issues}"\n`);
 
       const session = await executeIssues(cliOptions.issues, config);
 
@@ -61,7 +61,7 @@ async function main(): Promise<void> {
       console.log();
     } else if (cliOptions.directive) {
       // Planner mode: directive → issues → execution
-      console.log(`\n🚀 Ralphy 2.0 - Processing directive\n`);
+      console.log(`\n🚀 Autoissue 2.0 - Processing directive\n`);
       console.log(`   "${cliOptions.directive}"\n`);
 
       // TODO: Implement planner
