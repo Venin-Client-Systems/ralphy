@@ -10,22 +10,29 @@ import * as worktree from '../core/worktree.js';
 
 // Mock node:child_process
 vi.mock('node:child_process', () => ({
-  exec: vi.fn((cmd, opts, callback) => {
-    // Simulate successful git commands for most cases
+  execFile: vi.fn((file, args, opts, callback) => {
+    // Handle different callback signatures
     if (typeof opts === 'function') {
       callback = opts;
     }
 
-    // Simulate different git command responses
-    if (cmd.includes('git branch')) {
+    // Simulate different git command responses based on args array
+    const argsStr = args.join(' ');
+
+    if (args[0] === 'branch' && args.length === 3) {
+      // git branch <name> <baseBranch>
       callback?.(null, { stdout: '', stderr: '' });
-    } else if (cmd.includes('git worktree add')) {
+    } else if (args[0] === 'worktree' && args[1] === 'add') {
+      // git worktree add <path> <branch>
       callback?.(null, { stdout: 'Preparing worktree', stderr: '' });
-    } else if (cmd.includes('git -C') && cmd.includes('rev-parse HEAD')) {
+    } else if (args[0] === '-C' && args.includes('rev-parse') && args.includes('HEAD')) {
+      // git -C <path> rev-parse HEAD
       callback?.(null, { stdout: 'abc123\n', stderr: '' });
-    } else if (cmd.includes('git worktree remove')) {
+    } else if (args[0] === 'worktree' && args[1] === 'remove') {
+      // git worktree remove <path> --force
       callback?.(null, { stdout: '', stderr: '' });
-    } else if (cmd.includes('git worktree list --porcelain')) {
+    } else if (args[0] === 'worktree' && args[1] === 'list' && args[2] === '--porcelain') {
+      // git worktree list --porcelain
       const output = `worktree /path/to/main
 HEAD abc123
 branch refs/heads/main
@@ -35,10 +42,11 @@ HEAD def456
 branch refs/heads/test-branch
 `;
       callback?.(null, { stdout: output, stderr: '' });
-    } else if (cmd.includes('git rev-parse --verify')) {
-      // Branch doesn't exist
+    } else if (args[0] === 'rev-parse' && args[1] === '--verify') {
+      // git rev-parse --verify <branch>
       callback?.(new Error('fatal: not a valid ref'), { stdout: '', stderr: '' });
-    } else if (cmd.includes('git worktree prune')) {
+    } else if (args[0] === 'worktree' && args[1] === 'prune') {
+      // git worktree prune
       callback?.(null, { stdout: '', stderr: '' });
     } else {
       callback?.(null, { stdout: '', stderr: '' });

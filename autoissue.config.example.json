@@ -1,0 +1,40 @@
+{
+  "project": {
+    "repo": "owner/repo",
+    "path": "/Users/username/Developer/projects/myproject",
+    "baseBranch": "main"
+  },
+  "executor": {
+    "maxParallel": 3,
+    "timeoutMinutes": 30,
+    "createPr": true,
+    "prDraft": false
+  },
+  "planner": {
+    "enabled": true,
+    "model": "sonnet",
+    "maxBudgetUsd": 2.0,
+    "maxTurns": 5
+  },
+  "agent": {
+    "model": "sonnet",
+    "maxBudgetUsd": 5.0,
+    "yolo": true,
+    "maxTurns": 8
+  },
+  "maxTotalBudgetUsd": 50.0,
+  "telegram": {
+    "enabled": false,
+    "token": "YOUR_BOT_TOKEN_HERE",
+    "allowedUserIds": [123456789],
+    "health": {
+      "enabled": false,
+      "port": 3000,
+      "bindAddress": "0.0.0.0"
+    }
+  },
+  "dashboard": {
+    "enabled": false,
+    "port": 3030
+  }
+}

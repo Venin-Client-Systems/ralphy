@@ -8,13 +8,13 @@
  * - Type safety
  */
 
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { logger } from '../lib/logger.js';
 import { WorktreeError } from '../lib/types.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /**
  * Represents a git worktree instance
@@ -110,15 +110,15 @@ export async function createWorktree(
     const branchExists = await checkBranchExists(branch);
     if (!branchExists) {
       logger.debug('Creating branch', { branch, baseBranch });
-      await execAsync(`git branch ${branch} ${baseBranch}`);
+      await execFileAsync('git', ['branch', branch, baseBranch], { encoding: 'utf-8' });
     }
 
     // Create the worktree
     logger.debug('Adding worktree', { branch, worktreePath });
-    await execAsync(`git worktree add ${worktreePath} ${branch}`);
+    await execFileAsync('git', ['worktree', 'add', worktreePath, branch], { encoding: 'utf-8' });
 
     // Get commit SHA
-    const { stdout: commit } = await execAsync(`git -C ${worktreePath} rev-parse HEAD`);
+    const { stdout: commit } = await execFileAsync('git', ['-C', worktreePath, 'rev-parse', 'HEAD'], { encoding: 'utf-8' });
 
     const worktree: Worktree = {
       path: worktreePath,
@@ -172,7 +172,7 @@ export async function cleanupWorktree(worktreePath: string): Promise<void> {
 
   try {
     // Remove the worktree
-    await execAsync(`git worktree remove ${worktreePath} --force`);
+    await execFileAsync('git', ['worktree', 'remove', worktreePath, '--force'], { encoding: 'utf-8' });
     logger.info('Worktree removed', { worktreePath });
   } catch (err) {
     logger.error('Failed to remove worktree', {
@@ -191,7 +191,7 @@ export async function cleanupWorktree(worktreePath: string): Promise<void> {
  */
 export async function listWorktrees(): Promise<Worktree[]> {
   try {
-    const { stdout } = await execAsync('git worktree list --porcelain');
+    const { stdout } = await execFileAsync('git', ['worktree', 'list', '--porcelain'], { encoding: 'utf-8' });
     return parseWorktreeList(stdout);
   } catch (err) {
     logger.error('Failed to list worktrees', {
@@ -208,7 +208,7 @@ export async function listWorktrees(): Promise<Worktree[]> {
  */
 async function checkBranchExists(branch: string): Promise<boolean> {
   try {
-    await execAsync(`git rev-parse --verify ${branch}`);
+    await execFileAsync('git', ['rev-parse', '--verify', branch], { encoding: 'utf-8' });
     return true;
   } catch {
     return false;
@@ -262,7 +262,7 @@ export async function findWorktreeByBranch(branch: string): Promise<Worktree | n
 export async function pruneWorktrees(): Promise<void> {
   logger.debug('Pruning stale worktrees');
   try {
-    await execAsync('git worktree prune');
+    await execFileAsync('git', ['worktree', 'prune'], { encoding: 'utf-8' });
     logger.info('Stale worktrees pruned');
   } catch (err) {
     logger.error('Failed to prune worktrees', {

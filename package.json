@@ -35,9 +35,14 @@
     "test:ui": "vitest --ui"
   },
   "dependencies": {
+    "@types/react": "^19.2.14",
+    "chalk": "^5.6.2",
     "commander": "^13.1.0",
+    "ink": "^6.8.0",
+    "ink-spinner": "^5.0.0",
     "lru-cache": "^11.2.6",
     "nanoid": "^5.1.2",
+    "react": "^19.2.4",
     "zod": "^3.24.2"
   },
   "devDependencies": {

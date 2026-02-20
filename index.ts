@@ -8,8 +8,34 @@
 
 import { parseArgs, validateCliOptions } from './cli.js';
 import { loadConfig, discoverConfig, generateDefaultConfig } from './lib/config.js';
-import { executeIssues } from './core/executor.js';
+import { executeIssues, executePlannerMode } from './core/executor.js';
 import { logger } from './lib/logger.js';
+
+let shutdownRequested = false;
+const activeControllers = new Set<AbortController>();
+
+// Graceful shutdown handlers
+process.on('SIGINT', async () => {
+  if (shutdownRequested) {
+    console.log('\n🔴 Force quit');
+    process.exit(1);
+  }
+
+  shutdownRequested = true;
+  console.log('\n🛑 Shutting down gracefully... (Ctrl+C again to force)');
+
+  // Abort all active operations
+  for (const controller of activeControllers) {
+    controller.abort();
+  }
+
+  // Wait for cleanup
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  console.log('✅ Shutdown complete');
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => process.kill(process.pid, 'SIGINT'));
 
 async function main(): Promise<void> {
   try {
@@ -51,7 +77,9 @@ async function main(): Promise<void> {
       // Direct mode: process issues by label
       console.log(`\n🚀 Autoissue 2.0 - Processing issues labeled "${cliOptions.issues}"\n`);
 
-      const session = await executeIssues(cliOptions.issues, config);
+      const session = await executeIssues(cliOptions.issues, config, {
+        headless: cliOptions.headless,
+      });
 
       console.log('\n✅ Execution complete!');
       console.log(`   Total tasks: ${session.tasks.length}`);
@@ -64,9 +92,17 @@ async function main(): Promise<void> {
       console.log(`\n🚀 Autoissue 2.0 - Processing directive\n`);
       console.log(`   "${cliOptions.directive}"\n`);
 
-      // TODO: Implement planner
-      console.error('Planner mode not yet implemented. Use --issues for now.');
-      process.exit(1);
+      const session = await executePlannerMode(cliOptions.directive, config, {
+        headless: cliOptions.headless,
+        dryRun: cliOptions.dryRun,
+      });
+
+      console.log('\n✅ Execution complete!');
+      console.log(`   Total tasks: ${session.tasks.length}`);
+      console.log(`   Completed: ${session.tasks.filter((t) => t.status === 'completed').length}`);
+      console.log(`   Failed: ${session.tasks.filter((t) => t.status === 'failed').length}`);
+      console.log(`   Total cost: $${session.totalCost.toFixed(2)}`);
+      console.log();
     } else if (cliOptions.resume) {
       // Resume mode
       console.error('Resume mode not yet implemented.');

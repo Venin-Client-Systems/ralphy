@@ -124,7 +124,13 @@ async function runClaude(args: string[], timeoutMs: number, cwd?: string): Promi
       cwd,
     });
 
-    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+    proc.stdout.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+      // Stream to console in real-time
+      if (process.env.AUTOISSUE_STREAM !== 'false') {
+        process.stdout.write(chunk);
+      }
+    });
     proc.stderr.on('data', (chunk: Buffer) => errChunks.push(chunk));
 
     let killTimer: ReturnType<typeof setTimeout> | null = null;
