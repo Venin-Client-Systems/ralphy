@@ -76,6 +76,30 @@ export async function resumeExecution(
     incompleteTasks: incompleteTasks.length
   });
 
+  // Detect current branch and use it as base (for feature branch workflow)
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+
+  try {
+    const { stdout } = await execFileAsync('git', ['branch', '--show-current'], {
+      cwd: session.config.project.path,
+    });
+    const currentBranch = stdout.trim();
+
+    if (currentBranch && currentBranch !== session.config.project.baseBranch) {
+      logger.info('Using current branch as base for PRs', {
+        currentBranch,
+        configuredBase: session.config.project.baseBranch,
+      });
+      session.config.project.baseBranch = currentBranch;
+    }
+  } catch (err) {
+    logger.warn('Failed to detect current branch, using configured base', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   // Initialize budget tracker with remaining budget
   const remainingBudget = Math.max(0, session.config.maxTotalBudgetUsd - session.totalCost);
   const budgetTracker = new BudgetTracker(remainingBudget);
@@ -168,6 +192,30 @@ export async function executeIssues(
 ): Promise<SessionState> {
   const sessionId = nanoid();
   logger.info('Starting execution session', { sessionId, label });
+
+  // Detect current branch and use it as base (for feature branch workflow)
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+
+  try {
+    const { stdout } = await execFileAsync('git', ['branch', '--show-current'], {
+      cwd: config.project.path,
+    });
+    const currentBranch = stdout.trim();
+
+    if (currentBranch && currentBranch !== config.project.baseBranch) {
+      logger.info('Using current branch as base for PRs', {
+        currentBranch,
+        configuredBase: config.project.baseBranch,
+      });
+      config.project.baseBranch = currentBranch;
+    }
+  } catch (err) {
+    logger.warn('Failed to detect current branch, using configured base', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   // Initialize budget tracker
   const budgetTracker = new BudgetTracker(config.maxTotalBudgetUsd);
@@ -316,6 +364,30 @@ export async function executePlannerMode(
 
   const sessionId = nanoid();
   logger.info('Starting planner mode', { sessionId, directive });
+
+  // Detect current branch and use it as base (for feature branch workflow)
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+
+  try {
+    const { stdout } = await execFileAsync('git', ['branch', '--show-current'], {
+      cwd: config.project.path,
+    });
+    const currentBranch = stdout.trim();
+
+    if (currentBranch && currentBranch !== config.project.baseBranch) {
+      logger.info('Using current branch as base for PRs', {
+        currentBranch,
+        configuredBase: config.project.baseBranch,
+      });
+      config.project.baseBranch = currentBranch;
+    }
+  } catch (err) {
+    logger.warn('Failed to detect current branch, using configured base', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   // Initialize budget tracker
   const budgetTracker = new BudgetTracker(config.maxTotalBudgetUsd);
