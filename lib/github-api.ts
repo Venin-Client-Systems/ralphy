@@ -8,10 +8,41 @@
 import { Octokit } from '@octokit/rest';
 import type { RestEndpointMethodTypes } from '@octokit/rest';
 import { LRUCache } from 'lru-cache';
+import { execSync } from 'node:child_process';
 import { logger } from './logger.js';
 import { CircuitBreaker, withErrorBoundary } from '../core/error-boundaries.js';
 import { GitHubError, ErrorCode, RateLimitError, validateGitHubIssue } from './types.js';
 import type { GitHubIssue } from './types.js';
+
+/**
+ * Get GitHub auth token from environment or gh CLI.
+ * Falls back to gh CLI's authenticated token if GITHUB_TOKEN is not set.
+ */
+function getAuthToken(providedAuth?: string): string | undefined {
+  // 1. Use provided auth
+  if (providedAuth) {
+    return providedAuth;
+  }
+
+  // 2. Use GITHUB_TOKEN environment variable
+  if (process.env.GITHUB_TOKEN) {
+    return process.env.GITHUB_TOKEN;
+  }
+
+  // 3. Fall back to gh CLI token (maintains backward compatibility)
+  try {
+    const token = execSync('gh auth token', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+    if (token) {
+      logger.debug('Using gh CLI token for authentication');
+      return token;
+    }
+  } catch (error) {
+    // gh CLI not installed or not authenticated
+    logger.debug('gh CLI token not available, API calls may fail for private repos');
+  }
+
+  return undefined;
+}
 
 /**
  * Cache entry for API responses.
@@ -57,7 +88,7 @@ export class GitHubAPI {
     cacheTtlMs = 5 * 60 * 1000 // 5 minutes
   ) {
     this.octokit = new Octokit({
-      auth: auth || process.env.GITHUB_TOKEN,
+      auth: getAuthToken(auth),
       userAgent: 'autoissue/2.0',
       log: {
         debug: (msg) => logger.debug(msg),
