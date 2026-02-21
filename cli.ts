@@ -47,9 +47,8 @@ export function parseArgs(argv: string[]): CliOptions {
     .option('-c, --config <path>', 'Path to autoissue.config.json')
     .option('-d, --directive <text>', 'Directive to execute (planner mode, explicit)')
     .option('-i, --issues <label>', 'GitHub label to process (direct mode, explicit)')
-    .option('--headless', 'Run without TUI', false)
+    .option('--headless', 'Run without TUI (logs only)', false)
     .option('--dry-run', 'Show plan without executing', false)
-    .option('--ui', 'Launch TUI (default: headless)', false)
     .option('--telegram', 'Start Telegram bot', false)
     .option('--dashboard', 'Enable dashboard server', false)
     .option('--resume', 'Resume last session (explicit)', false)
@@ -86,9 +85,9 @@ export function parseArgs(argv: string[]): CliOptions {
     config: opts.config,
     directive,
     issues,
-    headless: opts.headless || !opts.ui,
+    headless: opts.headless || false, // UI by default
     dryRun: opts.dryRun || false,
-    ui: opts.ui || false,
+    ui: !opts.headless, // UI on unless --headless
     telegram: opts.telegram || false,
     dashboard: opts.dashboard || false,
     resume,
