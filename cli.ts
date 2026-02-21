@@ -172,13 +172,7 @@ function parseLegacyArgs(argv: string[]): ParsedCliOptions {
   let resume: boolean = opts.resume || false;
   let subcommand: Subcommand = null;
 
-  // Show deprecation warning
-  console.warn('\n⚠️  LEGACY USAGE DETECTED - Please migrate to explicit subcommands:\n');
-  console.warn('  autoissue exec <label>       - Execute issues by label');
-  console.warn('  autoissue plan "<directive>" - Plan and execute from directive');
-  console.warn('  autoissue resume             - Resume last session');
-  console.warn('  autoissue status             - Show session status');
-  console.warn('  autoissue metrics            - Show metrics\n');
+  // Legacy syntax support (no warning)
 
   // Auto-detect mode if using positional argument
   if (!directive && !issues && !resume && args.length > 0) {
