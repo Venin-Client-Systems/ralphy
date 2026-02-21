@@ -88,19 +88,21 @@ export function discoverConfig(cwd: string = process.cwd()): string | null {
  * Generate default config for a git repository.
  */
 export function generateDefaultConfig(cwd: string = process.cwd()): AutoissueConfig {
+  logger.debug('Generating default config', { cwd });
+
   const gitRoot = getGitRoot(cwd);
   if (!gitRoot) {
-    throw new Error('Not in a git repository');
+    throw new Error(`Not in a git repository (checked: ${cwd}). Run 'git init' or provide --config.`);
   }
 
   const remote = getGitRemote(gitRoot);
   if (!remote) {
-    throw new Error('No git remote found');
+    throw new Error(`No git remote found in ${gitRoot}. Run 'git remote add origin <url>' or provide --config.`);
   }
 
   const repo = parseGitRemote(remote);
   if (!repo) {
-    throw new Error(`Invalid git remote: ${remote}`);
+    throw new Error(`Invalid git remote: ${remote}. Expected GitHub URL (https:// or git@).`);
   }
 
   const config: AutoissueConfig = {
@@ -141,9 +143,15 @@ function getGitRoot(cwd: string): string | null {
     const root = execSync('git rev-parse --show-toplevel', {
       cwd,
       encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'], // Suppress stderr
     }).trim();
+    logger.debug('Found git root', { cwd, root });
     return root;
-  } catch {
+  } catch (err) {
+    logger.debug('Git detection failed', {
+      cwd,
+      error: err instanceof Error ? err.message : String(err)
+    });
     return null;
   }
 }
@@ -157,9 +165,15 @@ function getGitRemote(gitRoot: string): string | null {
     const remote = execSync('git remote get-url origin', {
       cwd: gitRoot,
       encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'], // Suppress stderr
     }).trim();
+    logger.debug('Found git remote', { gitRoot, remote });
     return remote;
-  } catch {
+  } catch (err) {
+    logger.debug('Git remote detection failed', {
+      gitRoot,
+      error: err instanceof Error ? err.message : String(err)
+    });
     return null;
   }
 }

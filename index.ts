@@ -61,10 +61,12 @@ async function main(): Promise<void> {
       const discoveredPath = discoverConfig();
       if (discoveredPath) {
         config = loadConfig(discoveredPath);
+        logger.debug('Config loaded from', { path: discoveredPath });
       } else {
         // Generate default config
-        console.log('No config found. Generating defaults from git repository...');
+        logger.debug('No config file found, generating defaults...');
         config = generateDefaultConfig();
+        console.log(`✅ Auto-detected: ${config.project.repo} (${config.project.path})`);
       }
     }
 
