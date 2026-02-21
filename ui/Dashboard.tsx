@@ -83,16 +83,19 @@ const DashboardInner: React.FC<DashboardProps> = ({
                   <Text>
                     <Text color="green"><Spinner type="dots" /></Text>
                     {' '}
-                    <Text color="yellow" bold>#{task.issueNumber}</Text>
+                    <Text color="cyan" bold>Issue #{task.issueNumber}</Text>
                     {' '}
                     <Text color="blue">[{task.domain}]</Text>
                     {' '}
-                    {task.title}
+                    <Text dimColor>{task.title.substring(0, 60)}{task.title.length > 60 ? '...' : ''}</Text>
                   </Text>
+                  {task.currentAction && (
+                    <Text color="yellow" dimColor>
+                      {'  '}▸ {task.currentAction}
+                    </Text>
+                  )}
                   <Text color="gray" dimColor>
-                    {'  '}Elapsed: {minutes}m {seconds}s
-                    {task.agentSessionId && ` | Session: ${task.agentSessionId.substring(0, 8)}...`}
-                    {task.worktreePath && ` | Worktree: ${task.worktreePath.split('/').pop()}`}
+                    {'  '}⏱ {minutes}m {seconds}s | Session {task.agentSessionId?.substring(0, 8) || 'starting...'}
                   </Text>
                 </Box>
               );
@@ -110,17 +113,17 @@ const DashboardInner: React.FC<DashboardProps> = ({
 
         <Box flexDirection="column">
           <Text>
+            <Text color="cyan" bold>Claude Sessions Active: {running.length}</Text>
+            {' | '}
             Queue: <Text color="blue">{pending.length}</Text>
             {' | '}
-            Running: <Text color="yellow">{running.length}</Text>
-            {' | '}
-            Completed: <Text color="green">{completed.length}</Text>
+            Done: <Text color="green">{completed.length}</Text>
             {' | '}
             Failed: <Text color="red">{failed.length}</Text>
           </Text>
           {completed.length > 0 && (
             <Text color="gray" dimColor>
-              Recent: {completed.slice(-2).map(t => `#${t.issueNumber}`).join(', ')}
+              ✓ Recently completed: {completed.slice(-3).map(t => `#${t.issueNumber}`).join(', ')}
             </Text>
           )}
         </Box>

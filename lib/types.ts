@@ -265,6 +265,7 @@ export interface Task {
   labels: string[];
   domain: Domain;
   status: TaskStatus;
+  currentAction?: string; // What the agent is currently doing
   agentSessionId?: string;
   worktreePath?: string;
   prNumber?: number;

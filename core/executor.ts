@@ -721,6 +721,7 @@ async function executeTask(
   const startTime = Date.now();
   task.status = 'running';
   task.startedAt = new Date();
+  task.currentAction = 'Initializing...';
 
   // Broadcast status update
   if (stopDashboard) {
@@ -733,6 +734,9 @@ async function executeTask(
 
   try {
     // Step 1: Create isolated worktree
+    task.currentAction = 'Creating worktree...';
+    if (!isHeadless) updateUI(session);
+
     const branchName = `autoissue/issue-${task.issueNumber}`;
     const { worktree, cleanup } = await createWorktree(branchName, {
       baseBranch: config.project.baseBranch,
@@ -761,6 +765,9 @@ async function executeTask(
     });
 
     // Step 3: Spawn agent in worktree with smart retry
+    task.currentAction = `Running ${selectedModel} agent...`;
+    if (!isHeadless) updateUI(session);
+
     const MAX_RETRIES = 2;
     let retries = 0;
     let lastError: Error | null = null;
@@ -781,6 +788,9 @@ async function executeTask(
         task.costUsd = response.costUsd;
         session.totalCost += response.costUsd;
 
+        task.currentAction = 'Agent completed, checking changes...';
+        if (!isHeadless) updateUI(session);
+
         logger.info('Agent completed', {
           issueNumber: task.issueNumber,
           sessionId: response.sessionId,
@@ -788,11 +798,6 @@ async function executeTask(
           duration: response.durationMs,
           attempts: retries + 1,
         });
-
-        // Update UI after agent completion
-        if (!isHeadless) {
-          updateUI(session);
-        }
 
         // Success! Break out of retry loop
         break;
