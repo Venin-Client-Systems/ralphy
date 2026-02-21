@@ -306,10 +306,24 @@ async function loadConfigWithFallback(cliOptions: ParsedCliOptions): Promise<Aut
  * Print session summary.
  */
 function printSessionSummary(session: any): void {
-  console.log('\n✅ Execution complete!');
-  console.log(`   Total tasks: ${session.tasks.length}`);
-  console.log(`   Completed: ${session.tasks.filter((t: any) => t.status === 'completed').length}`);
-  console.log(`   Failed: ${session.tasks.filter((t: any) => t.status === 'failed').length}`);
+  const completed = session.tasks.filter((t: any) => t.status === 'completed').length;
+  const failed = session.tasks.filter((t: any) => t.status === 'failed').length;
+  const total = session.tasks.length;
+
+  // Show success/failure based on actual results
+  if (completed === 0 && failed > 0) {
+    console.log('\n❌ Execution failed - all tasks unsuccessful!');
+  } else if (completed === total) {
+    console.log('\n✅ Execution complete - all tasks successful!');
+  } else if (completed > 0) {
+    console.log('\n⚠️  Execution complete with failures!');
+  } else {
+    console.log('\n✅ Execution complete!');
+  }
+
+  console.log(`   Total tasks: ${total}`);
+  console.log(`   Completed: ${completed}`);
+  console.log(`   Failed: ${failed}`);
   console.log(`   Total cost: $${session.totalCost.toFixed(2)}`);
   console.log();
 }

@@ -28,11 +28,17 @@ export interface TaskMetrics {
 export async function createPullRequest(
   task: Task,
   branch: string,
-  config: AutoissueConfig
+  config: AutoissueConfig,
+  worktreePath: string
 ): Promise<number> {
   logger.debug('Creating PR via Octokit', { issueNumber: task.issueNumber, branch });
 
   try {
+    // Push branch to remote before creating PR
+    logger.debug('Pushing branch to remote', { branch, worktreePath });
+    await execFileAsync('git', ['push', '-u', 'origin', branch], { cwd: worktreePath });
+    logger.info('Branch pushed to remote', { branch });
+
     // Build PR title and body
     const title = `${task.title}`;
     const body = `Closes #${task.issueNumber}

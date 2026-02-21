@@ -825,7 +825,51 @@ async function executeTask(
     task.costUsd = response.costUsd;
     session.totalCost += response.costUsd;
 
-    task.currentAction = 'Agent completed, checking changes...';
+    task.currentAction = 'Agent completed, committing changes...';
+    if (!isHeadless) updateUI(session);
+
+    // Step 3.5: Commit agent's changes (required for PR creation)
+    try {
+      const { execFile } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const execFileAsync = promisify(execFile);
+
+      // Check if there are changes to commit
+      const { stdout: statusOutput } = await execFileAsync('git', ['status', '--porcelain'], {
+        cwd: worktree.path,
+      });
+
+      if (statusOutput.trim()) {
+        // Stage all changes
+        await execFileAsync('git', ['add', '-A'], { cwd: worktree.path });
+
+        // Commit with descriptive message
+        const commitMessage = `fix: ${task.title}
+
+Resolves #${task.issueNumber}
+
+${task.body.split('\n').slice(0, 3).join('\n')}
+
+Co-authored-by: Claude AI <noreply@anthropic.com>`;
+
+        await execFileAsync('git', ['commit', '-m', commitMessage], {
+          cwd: worktree.path,
+        });
+
+        logger.info('Changes committed', { issueNumber: task.issueNumber });
+      } else {
+        logger.warn('No changes to commit', { issueNumber: task.issueNumber });
+        throw new Error('Agent completed but made no changes to commit');
+      }
+    } catch (err) {
+      logger.error('Failed to commit changes', {
+        issueNumber: task.issueNumber,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+
+    task.currentAction = 'Changes committed, gathering metrics...';
     if (!isHeadless) updateUI(session);
 
     // Step 4: Gather task metrics
@@ -848,7 +892,7 @@ async function executeTask(
 
     // Step 5: Create PR (if configured)
     if (config.executor.createPr) {
-      const prNumber = await createPR(task, worktree.branch, config);
+      const prNumber = await createPR(task, worktree.branch, config, worktree.path);
       task.prNumber = prNumber;
       logger.info('PR created', { issueNumber: task.issueNumber, prNumber });
     }

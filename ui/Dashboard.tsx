@@ -117,15 +117,8 @@ const DashboardInner: React.FC<DashboardProps> = ({
 
           <Box flexDirection="column" width="50%">
             <Text>
-              <Text bold>Budget: </Text>
-              <Text color={parseFloat(costPercent) > 80 ? 'red' : 'green'}>
-                ${totalCost.toFixed(2)}
-              </Text>
-              <Text dimColor> / ${maxBudget.toFixed(2)}</Text>
-            </Text>
-            <Text>
-              <Text bold>Remaining: </Text>
-              <Text color={remaining < 5 ? 'red' : 'cyan'}>${remaining.toFixed(2)}</Text>
+              <Text bold>Total Cost: </Text>
+              <Text color="cyan">${totalCost.toFixed(2)}</Text>
             </Text>
             {avgCost > 0 && (
               <Text dimColor>Avg: ${avgCost.toFixed(2)}/task</Text>
