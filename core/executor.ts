@@ -237,17 +237,9 @@ export async function executeIssues(
       })),
     });
 
-    // Step 2.5: Predict total cost using budget tracker
-    const canAfford = budgetTracker.canAffordTasks(tasks.length);
-    if (!canAfford) {
-      const estimatedCost = budgetTracker.estimateNextTaskCost() * tasks.length;
-      throw new Error(
-        `Cannot afford ${tasks.length} tasks: estimated $${estimatedCost.toFixed(2)} exceeds budget $${config.maxTotalBudgetUsd.toFixed(2)}`
-      );
-    }
-
+    // Budget tracking is optional - no enforcement
     const state = budgetTracker.getState();
-    logger.info('Budget check passed', {
+    logger.debug('Budget state (informational only)', {
       tasks: tasks.length,
       estimatedCost: `$${(budgetTracker.estimateNextTaskCost() * tasks.length).toFixed(2)}`,
       budget: `$${config.maxTotalBudgetUsd.toFixed(2)}`,
