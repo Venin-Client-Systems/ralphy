@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { LRUCache } from 'lru-cache';
 import { logger } from './logger.js';
 import type { RateLimitState } from './types.js';
+import { CircuitBreaker, withErrorBoundary } from '../core/error-boundaries.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -20,6 +21,8 @@ interface CachedResponse {
 
 /**
  * Exponential backoff retry with jitter.
+ * @deprecated Use withErrorBoundary from core/error-boundaries.ts instead
+ *
  * maxRetries = total number of attempts (e.g., maxRetries=3 means try up to 3 times)
  */
 async function retryWithBackoff<T>(
@@ -71,6 +74,7 @@ export class GitHubClient {
   private cacheStats: CacheStats = { hits: 0, misses: 0 };
   private rateLimitState: RateLimitState | null = null;
   private pausedUntil: number | null = null;
+  private circuitBreaker = new CircuitBreaker(5, 60000); // 5 failures, 60s reset
 
   constructor(
     maxCacheEntries = 500,
@@ -80,6 +84,17 @@ export class GitHubClient {
       max: maxCacheEntries,
       ttl: cacheTtlMs,
     });
+  }
+
+  /**
+   * Get circuit breaker state.
+   */
+  getCircuitBreakerState(): {
+    state: 'closed' | 'open' | 'half_open';
+    failureCount: number;
+    threshold: number;
+  } {
+    return this.circuitBreaker.getState();
   }
 
   /**
@@ -259,19 +274,24 @@ export class GitHubClient {
       this.cacheStats.misses++;
     }
 
-    // Execute with retry logic
-    const result = await retryWithBackoff(async () => {
-      try {
-        const { stdout, stderr } = await execFileAsync('gh', args, { encoding: 'utf-8' });
-        return { stdout, stderr };
-      } catch (err) {
-        // Parse rate limit info from error if available
-        if (err && typeof err === 'object' && 'stderr' in err && typeof err.stderr === 'string') {
-          this.parseRateLimitFromError(err.stderr);
+    // Execute with retry logic using error boundary
+    const result = await withErrorBoundary(
+      async () => {
+        try {
+          const { stdout, stderr } = await execFileAsync('gh', args, { encoding: 'utf-8' });
+          return { stdout, stderr };
+        } catch (err) {
+          // Parse rate limit info from error if available
+          if (err && typeof err === 'object' && 'stderr' in err && typeof err.stderr === 'string') {
+            this.parseRateLimitFromError(err.stderr);
+          }
+          throw err;
         }
-        throw err;
-      }
-    });
+      },
+      `GitHub CLI: ${args.slice(0, 3).join(' ')}`,
+      { maxRetries: 3, baseDelayMs: 2000, maxDelayMs: 60000 },
+      this.circuitBreaker
+    );
 
     // Cache read operations
     if (cacheKey) {

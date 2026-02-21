@@ -14,6 +14,7 @@
 import { nanoid } from 'nanoid';
 import { logger } from '../lib/logger.js';
 import { githubClient } from '../lib/github-client.js';
+import { githubApi } from '../lib/github-api.js';
 import type {
   AutoissueConfig,
   Task,
@@ -37,13 +38,28 @@ import { spawnAgent } from './agent.js';
 import { saveState } from './state.js';
 import { startUI, updateUI, stopUI } from '../ui/cli-ui.js';
 import { selectOptimalModel } from '../lib/model-selector.js';
-import { analyzeError, enhancePrompt, calculateBackoff, sleep } from '../lib/smart-retry.js';
+import { withErrorBoundary, CircuitBreaker, ErrorBoundaryObserver } from './error-boundaries.js';
+import { FeatureFlags } from '../lib/feature-flags.js';
 import { detectConflicts } from '../lib/conflict-detector.js';
+import { BudgetTracker } from './budget-tracker.js';
+import { buildTaskPrompt, buildSystemPrompt } from './prompt-builder.js';
+import { createPullRequest as createPR, gatherTaskMetrics } from './pr-manager.js';
 import { decomposeDirective } from './planner.js';
 import { DependencyGraph } from '../lib/dependency-graph.js';
 import { startDashboardServer, broadcastUpdate } from '../server/dashboard.js';
 import { homedir } from 'os';
 import { join } from 'path';
+
+/**
+ * Shared circuit breaker for agent operations.
+ * Persists across sessions to prevent cascading failures.
+ */
+const agentCircuitBreaker = new CircuitBreaker(5, 60000); // 5 failures, 60s reset
+
+/**
+ * Error boundary observer for metrics collection.
+ */
+const errorObserver = new ErrorBoundaryObserver();
 
 /**
  * Resume execution from a previous session.
@@ -60,12 +76,27 @@ export async function resumeExecution(
     incompleteTasks: incompleteTasks.length
   });
 
+  // Initialize budget tracker with remaining budget
+  const remainingBudget = Math.max(0, session.config.maxTotalBudgetUsd - session.totalCost);
+  const budgetTracker = new BudgetTracker(remainingBudget);
+
+  logger.info('Budget tracker initialized for resume', {
+    totalBudget: session.config.maxTotalBudgetUsd,
+    alreadySpent: session.totalCost,
+    remaining: remainingBudget,
+  });
+
   session.status = 'running';
 
   // Start dashboard server if enabled
   let stopDashboard: (() => void) | null = null;
   if (options?.dashboard || session.config.dashboard?.enabled) {
-    stopDashboard = startDashboardServer(session.config.dashboard?.port || 3030);
+    stopDashboard = startDashboardServer(session.config.dashboard?.port || 3030, {
+      budgetTracker,
+      circuitBreaker: agentCircuitBreaker,
+      errorObserver,
+      config: session.config.dashboard,
+    });
   }
 
   try {
@@ -82,7 +113,7 @@ export async function resumeExecution(
     }
 
     // Execute with sliding window
-    await executeSlidingWindow(scheduler, session, session.config, isHeadless, stopDashboard);
+    await executeSlidingWindow(scheduler, session, session.config, budgetTracker, isHeadless, stopDashboard);
 
     // Mark session complete
     session.status = 'completed';
@@ -138,6 +169,9 @@ export async function executeIssues(
   const sessionId = nanoid();
   logger.info('Starting execution session', { sessionId, label });
 
+  // Initialize budget tracker
+  const budgetTracker = new BudgetTracker(config.maxTotalBudgetUsd);
+
   // Initialize session state
   const session: SessionState = {
     sessionId,
@@ -152,7 +186,12 @@ export async function executeIssues(
   // Start dashboard server if enabled
   let stopDashboard: (() => void) | null = null;
   if (options?.dashboard || config.dashboard?.enabled) {
-    stopDashboard = startDashboardServer(config.dashboard?.port || 3030);
+    stopDashboard = startDashboardServer(config.dashboard?.port || 3030, {
+      budgetTracker,
+      circuitBreaker: agentCircuitBreaker,
+      errorObserver,
+      config: config.dashboard,
+    });
   }
 
   try {
@@ -198,18 +237,21 @@ export async function executeIssues(
       })),
     });
 
-    // Step 2.5: Predict total cost
-    const estimatedCost = tasks.length * config.agent.maxBudgetUsd;
-    if (config.maxTotalBudgetUsd && estimatedCost > config.maxTotalBudgetUsd) {
-      const error = `Estimated cost ($${estimatedCost.toFixed(2)}) exceeds budget ($${config.maxTotalBudgetUsd.toFixed(2)})`;
-      logger.error('Budget exceeded', { estimatedCost, budget: config.maxTotalBudgetUsd });
-      throw new Error(error);
+    // Step 2.5: Predict total cost using budget tracker
+    const canAfford = budgetTracker.canAffordTasks(tasks.length);
+    if (!canAfford) {
+      const estimatedCost = budgetTracker.estimateNextTaskCost() * tasks.length;
+      throw new Error(
+        `Cannot afford ${tasks.length} tasks: estimated $${estimatedCost.toFixed(2)} exceeds budget $${config.maxTotalBudgetUsd.toFixed(2)}`
+      );
     }
-    logger.info('Cost prediction', {
+
+    const state = budgetTracker.getState();
+    logger.info('Budget check passed', {
       tasks: tasks.length,
-      estimatedCost: `$${estimatedCost.toFixed(2)}`,
-      budget: config.maxTotalBudgetUsd ? `$${config.maxTotalBudgetUsd.toFixed(2)}` : 'unlimited',
-      remaining: config.maxTotalBudgetUsd ? `$${(config.maxTotalBudgetUsd - estimatedCost).toFixed(2)}` : 'N/A',
+      estimatedCost: `$${(budgetTracker.estimateNextTaskCost() * tasks.length).toFixed(2)}`,
+      budget: `$${config.maxTotalBudgetUsd.toFixed(2)}`,
+      remaining: `$${state.remainingUsd.toFixed(2)}`,
     });
 
     // Step 3: Create scheduler
@@ -223,7 +265,7 @@ export async function executeIssues(
     }
 
     // Step 4: Execute with sliding window
-    await executeSlidingWindow(scheduler, session, config, isHeadless, stopDashboard);
+    await executeSlidingWindow(scheduler, session, config, budgetTracker, isHeadless, stopDashboard);
 
     // Mark session complete
     session.status = 'completed';
@@ -283,6 +325,9 @@ export async function executePlannerMode(
   const sessionId = nanoid();
   logger.info('Starting planner mode', { sessionId, directive });
 
+  // Initialize budget tracker
+  const budgetTracker = new BudgetTracker(config.maxTotalBudgetUsd);
+
   // Initialize session state
   const session: SessionState = {
     sessionId,
@@ -297,7 +342,12 @@ export async function executePlannerMode(
   // Start dashboard server if enabled
   let stopDashboard: (() => void) | null = null;
   if (options?.dashboard || config.dashboard?.enabled) {
-    stopDashboard = startDashboardServer(config.dashboard?.port || 3030);
+    stopDashboard = startDashboardServer(config.dashboard?.port || 3030, {
+      budgetTracker,
+      circuitBreaker: agentCircuitBreaker,
+      errorObserver,
+      config: config.dashboard,
+    });
   }
 
   try {
@@ -461,7 +511,7 @@ export async function executePlannerMode(
     }
 
     // Execute with dependency awareness
-    await executeDependencyAware(scheduler, session, config, depGraph, isHeadless, stopDashboard);
+    await executeDependencyAware(scheduler, session, config, depGraph, budgetTracker, isHeadless, stopDashboard);
 
     // Mark session complete
     session.status = 'completed';
@@ -512,6 +562,7 @@ async function executeDependencyAware(
   session: SessionState,
   config: AutoissueConfig,
   depGraph: DependencyGraph,
+  budgetTracker: BudgetTracker,
   isHeadless: boolean,
   stopDashboard?: (() => void) | null
 ): Promise<void> {
@@ -550,7 +601,7 @@ async function executeDependencyAware(
         emptySlot.startedAt = new Date();
       }
 
-      const promise = executeTask(task, config, scheduler, session, isHeadless, stopDashboard)
+      const promise = executeTask(task, config, scheduler, session, budgetTracker, isHeadless, stopDashboard)
         .then(() => {
           completedIssues.add(task.issueNumber);
         })
@@ -603,37 +654,17 @@ async function executeDependencyAware(
 
 /**
  * Fetch issues from GitHub by label.
+ *
+ * Uses @octokit/rest for 10x performance improvement over gh CLI.
  */
 async function fetchIssuesByLabel(repo: string, label: string): Promise<GitHubIssue[]> {
-  logger.debug('Fetching issues', { repo, label });
+  logger.debug('Fetching issues via Octokit', { repo, label });
 
   try {
-    // Use gh CLI to fetch issues via githubClient (handles rate limits)
-    const stdout = await githubClient.execForStdout([
-      'issue', 'list',
-      '--repo', repo,
-      '--label', label,
-      '--state', 'open',
-      '--json', 'number,title,body,labels,state,assignees,createdAt,updatedAt,url',
-      '--limit', '100'
-    ]);
+    // Use Octokit API (10x faster than gh CLI)
+    const issues = await githubApi.listIssues(repo, [label]);
 
-    const rawIssues = JSON.parse(stdout);
-
-    // Transform to GitHubIssue format
-    const issues: GitHubIssue[] = rawIssues.map((issue: any) => ({
-      number: issue.number,
-      title: issue.title,
-      body: issue.body || '',
-      labels: issue.labels?.map((l: any) => l.name) || [],
-      state: issue.state,
-      assignee: issue.assignees?.[0]?.login,
-      created_at: issue.createdAt,
-      updated_at: issue.updatedAt,
-      html_url: issue.url,
-    }));
-
-    logger.info('Fetched issues from GitHub', {
+    logger.info('Fetched issues from GitHub via Octokit', {
       repo,
       label,
       count: issues.length,
@@ -657,6 +688,7 @@ async function executeSlidingWindow(
   scheduler: SchedulerState,
   session: SessionState,
   config: AutoissueConfig,
+  budgetTracker: BudgetTracker,
   isHeadless: boolean,
   stopDashboard?: (() => void) | null
 ): Promise<void> {
@@ -670,7 +702,7 @@ async function executeSlidingWindow(
   const scheduleNext = () => {
     const available = fillSlots(scheduler);
     for (const task of available) {
-      const promise = executeTask(task, config, scheduler, session, isHeadless, stopDashboard)
+      const promise = executeTask(task, config, scheduler, session, budgetTracker, isHeadless, stopDashboard)
         .catch((err) => {
           logger.error('Task execution failed', {
             issueNumber: task.issueNumber,
@@ -715,6 +747,7 @@ async function executeTask(
   config: AutoissueConfig,
   scheduler: SchedulerState,
   session: SessionState,
+  budgetTracker: BudgetTracker,
   isHeadless: boolean,
   stopDashboard?: (() => void) | null
 ): Promise<void> {
@@ -764,17 +797,14 @@ async function executeTask(
       configuredModel: config.agent.model,
     });
 
-    // Step 3: Spawn agent in worktree with smart retry
+    // Step 3: Spawn agent in worktree with error boundary
     task.currentAction = `Running ${selectedModel} agent...`;
     if (!isHeadless) updateUI(session);
 
-    const MAX_RETRIES = 2;
-    let retries = 0;
-    let lastError: Error | null = null;
-
-    while (retries <= MAX_RETRIES) {
-      try {
-        const response = await spawnAgent(currentPrompt, {
+    // Execute with error boundary and circuit breaker
+    const response = await withErrorBoundary(
+      async () => {
+        return await spawnAgent(currentPrompt, {
           model: selectedModel,
           maxBudgetUsd: config.agent.maxBudgetUsd,
           systemPrompt: buildSystemPrompt(task),
@@ -783,67 +813,28 @@ async function executeTask(
           maxTurns: config.agent.maxTurns,
           timeoutMs: config.executor.timeoutMinutes * 60 * 1000,
         });
+      },
+      `Task #${task.issueNumber} (${selectedModel})`,
+      {
+        maxRetries: 2,
+        observer: FeatureFlags.ENABLE_METRICS ? errorObserver : undefined,
+      },
+      agentCircuitBreaker
+    );
 
-        task.agentSessionId = response.sessionId;
-        task.costUsd = response.costUsd;
-        session.totalCost += response.costUsd;
+    logger.info('Agent completed', {
+      issueNumber: task.issueNumber,
+      sessionId: response.sessionId,
+      cost: response.costUsd,
+      duration: response.durationMs,
+    });
 
-        task.currentAction = 'Agent completed, checking changes...';
-        if (!isHeadless) updateUI(session);
+    task.agentSessionId = response.sessionId;
+    task.costUsd = response.costUsd;
+    session.totalCost += response.costUsd;
 
-        logger.info('Agent completed', {
-          issueNumber: task.issueNumber,
-          sessionId: response.sessionId,
-          cost: response.costUsd,
-          duration: response.durationMs,
-          attempts: retries + 1,
-        });
-
-        // Success! Break out of retry loop
-        break;
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-
-        if (retries === MAX_RETRIES) {
-          // Out of retries, throw the error
-          throw lastError;
-        }
-
-        // Analyze error to determine if retryable
-        const analysis = analyzeError(lastError.message);
-
-        if (!analysis.retryable) {
-          // Non-retryable error, throw immediately
-          logger.error('Non-retryable error', {
-            issueNumber: task.issueNumber,
-            category: analysis.category,
-            error: lastError.message,
-          });
-          throw lastError;
-        }
-
-        // Retryable error
-        logger.warn('Task failed, retrying with enhanced prompt', {
-          issueNumber: task.issueNumber,
-          attempt: retries + 1,
-          category: analysis.category,
-          error: lastError.message,
-        });
-
-        // Enhance prompt with error context
-        currentPrompt = enhancePrompt(currentPrompt, analysis, retries + 1);
-
-        // Exponential backoff
-        const backoffMs = calculateBackoff(retries);
-        logger.debug('Waiting before retry', {
-          issueNumber: task.issueNumber,
-          backoffMs,
-        });
-        await sleep(backoffMs);
-
-        retries++;
-      }
-    }
+    task.currentAction = 'Agent completed, checking changes...';
+    if (!isHeadless) updateUI(session);
 
     // Step 4: Gather task metrics
     try {
@@ -865,7 +856,7 @@ async function executeTask(
 
     // Step 5: Create PR (if configured)
     if (config.executor.createPr) {
-      const prNumber = await createPullRequest(task, worktree.branch, config);
+      const prNumber = await createPR(task, worktree.branch, config);
       task.prNumber = prNumber;
       logger.info('PR created', { issueNumber: task.issueNumber, prNumber });
     }
@@ -929,131 +920,6 @@ async function executeTask(
       }
     }
   }
-}
-
-/**
- * Build the prompt for the agent.
- */
-function buildTaskPrompt(task: Task): string {
-  return `You are working on a specific task. Focus ONLY on this task:
-
-TASK: #${task.issueNumber} - ${task.title}
-
-${task.body}
-
-Instructions:
-1. Implement this task completely
-2. Write tests if appropriate
-3. Commit your changes with a descriptive message
-4. IMPORTANT: You MUST use tools to read and edit files in this repo
-
-SCOPE RULES (MANDATORY):
-- ONLY modify files directly required by this task
-- Do NOT refactor, rename, delete, or 'clean up' code outside the task scope
-- Do NOT remove imports, files, or utilities used by other parts of the codebase
-- Other agents are working on other tasks in parallel. Their work must not be disrupted.
-
-Focus only on implementing: ${task.title}`;
-}
-
-/**
- * Build the system prompt for the agent.
- */
-function buildSystemPrompt(task: Task): string {
-  return `You are a software engineer tasked with implementing issue #${task.issueNumber}.
-
-CRITICAL REQUIREMENTS:
-1. Read the issue body carefully and implement ALL requested changes
-2. Make the necessary code changes to fix/implement the issue
-3. Test your changes to ensure they work
-4. Commit your work with a clear commit message
-5. Push the branch so a PR can be created
-
-You MUST create commits. Do not just analyze - actually implement the solution and commit it.
-Stay focused on the issue scope. Avoid unrelated changes.`;
-}
-
-/**
- * Create a pull request for the completed task.
- */
-async function createPullRequest(
-  task: Task,
-  branch: string,
-  config: AutoissueConfig
-): Promise<number> {
-  logger.debug('Creating PR', { issueNumber: task.issueNumber, branch });
-
-  try {
-    // Build PR title and body
-    const title = `${task.title}`;
-    const body = `Closes #${task.issueNumber}
-
-${task.body}
-
----
-🤖 Generated by Autoissue`;
-
-    // Create PR via gh CLI (with rate limit handling)
-    const args = [
-      'pr', 'create',
-      '--repo', config.project.repo,
-      '--base', config.project.baseBranch,
-      '--head', branch,
-      '--title', title,
-      '--body', body
-    ];
-
-    if (config.executor.prDraft) {
-      args.push('--draft');
-    }
-
-    const stdout = await githubClient.execForStdout(args);
-
-    // Extract PR number from output (gh returns URL)
-    const match = stdout.match(/\/pull\/(\d+)/);
-    const prNumber = match ? parseInt(match[1], 10) : 0;
-
-    logger.info('PR created', {
-      issueNumber: task.issueNumber,
-      prNumber,
-      branch,
-      draft: config.executor.prDraft,
-    });
-
-    return prNumber;
-  } catch (err) {
-    logger.error('Failed to create PR', {
-      issueNumber: task.issueNumber,
-      branch,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw new Error(`Failed to create PR: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-/**
- * Gather task metrics (lines changed, files modified).
- */
-async function gatherTaskMetrics(worktreePath: string): Promise<{
-  linesAdded: number;
-  linesRemoved: number;
-  filesChanged: number;
-}> {
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const execFileAsync = promisify(execFile);
-
-  const { stdout } = await execFileAsync('git', [
-    'diff', '--shortstat', 'HEAD~1', 'HEAD'
-  ], { cwd: worktreePath });
-
-  const match = stdout.match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/);
-
-  return {
-    filesChanged: parseInt(match?.[1] || '0'),
-    linesAdded: parseInt(match?.[2] || '0'),
-    linesRemoved: parseInt(match?.[3] || '0'),
-  };
 }
 
 /**

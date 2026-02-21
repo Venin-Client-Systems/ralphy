@@ -32,20 +32,28 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:ui": "vitest --ui"
+    "test:ui": "vitest --ui",
+    "test:e2e": "vitest run __tests__/e2e",
+    "benchmark": "tsx scripts/benchmark.ts",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@octokit/rest": "^22.0.1",
+    "@octokit/types": "^16.0.0",
     "@types/react": "^19.2.14",
     "chalk": "^5.6.2",
     "commander": "^13.1.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
+    "express-basic-auth": "^1.2.1",
     "ink": "^6.8.0",
     "ink-spinner": "^5.0.0",
     "lru-cache": "^11.2.6",
     "nanoid": "^5.1.2",
     "react": "^19.2.4",
     "socket.io": "^4.8.3",
+    "winston": "^3.19.0",
+    "winston-daily-rotate-file": "^5.0.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {

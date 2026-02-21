@@ -1,8 +1,20 @@
 import type { Task } from './types.js';
 import { logger } from './logger.js';
+import { LRUCache } from 'lru-cache';
+
+/**
+ * Cache for file path extraction results.
+ * Avoids re-parsing the same text multiple times.
+ */
+const extractionCache = new LRUCache<string, string[]>({
+  max: 1000, // Cache up to 1000 unique texts
+  ttl: 10 * 60 * 1000, // 10 minute TTL
+});
 
 /**
  * Extract file paths from text using common patterns.
+ *
+ * Results are cached to avoid re-parsing the same text.
  *
  * Looks for:
  * - Source file paths (src/lib/foo.ts)
@@ -10,6 +22,11 @@ import { logger } from './logger.js';
  * - Common extensions (.ts, .js, .tsx, .jsx, .json, .md, .yml, .yaml)
  */
 export function extractFilePaths(text: string): string[] {
+  // Check cache first
+  const cached = extractionCache.get(text);
+  if (cached) {
+    return cached;
+  }
   const patterns = [
     // Source file paths with extensions (order matters - longer extensions first)
     /(?:src|lib|core|tests?|components?|pages?|app|utils?)\/[a-zA-Z0-9_\-\/\.]+\.(?:tsx|jsx|json|yaml|scss|html|ts|js|md|yml|css)\b/gi,
@@ -34,11 +51,22 @@ export function extractFilePaths(text: string): string[] {
     }
   }
 
-  return Array.from(files);
+  const result = Array.from(files);
+
+  // Cache the result
+  extractionCache.set(text, result);
+
+  return result;
 }
 
 /**
  * Detect file conflicts between tasks.
+ *
+ * Optimized O(n*k) algorithm with caching:
+ * - n = number of tasks
+ * - k = average files per task
+ *
+ * Uses Sets to avoid duplicate conflicts and caching to avoid re-parsing.
  *
  * Returns a map of task issue numbers to conflicting task issue numbers.
  *
@@ -48,51 +76,65 @@ export function extractFilePaths(text: string): string[] {
  * - Result: { 2: [1] } (task 2 conflicts with task 1)
  */
 export function detectConflicts(tasks: Task[]): Map<number, number[]> {
-  const fileOwnership = new Map<string, number[]>(); // file -> [issueNumbers]
-  const conflicts = new Map<number, number[]>(); // issueNumber -> [conflicting issueNumbers]
+  const fileOwnership = new Map<string, Set<number>>(); // file -> Set<issueNumber> (Set for O(1) lookups)
+  const conflicts = new Map<number, Set<number>>(); // issueNumber -> Set<conflicting issueNumbers>
 
-  // First pass: build file ownership map
+  // First pass: build file ownership map - O(n * k)
   for (const task of tasks) {
     const files = extractFilePaths(task.body + ' ' + task.title);
 
     for (const file of files) {
       if (!fileOwnership.has(file)) {
-        fileOwnership.set(file, []);
+        fileOwnership.set(file, new Set());
       }
-      fileOwnership.get(file)!.push(task.issueNumber);
+      fileOwnership.get(file)!.add(task.issueNumber);
     }
   }
 
-  // Second pass: detect conflicts
+  // Second pass: detect conflicts - O(f * m²) where f = files, m = avg tasks per file
+  // For typical case where m is small (1-2), this is effectively O(f * k)
   for (const [file, owners] of fileOwnership.entries()) {
-    if (owners.length > 1) {
+    if (owners.size > 1) {
       // Multiple tasks touch this file
       for (const issueNumber of owners) {
-        const otherOwners = owners.filter((n) => n !== issueNumber);
         if (!conflicts.has(issueNumber)) {
-          conflicts.set(issueNumber, []);
+          conflicts.set(issueNumber, new Set());
         }
-        conflicts.get(issueNumber)!.push(...otherOwners);
+        // Add all other owners as conflicts (Set automatically deduplicates)
+        for (const otherOwner of owners) {
+          if (otherOwner !== issueNumber) {
+            conflicts.get(issueNumber)!.add(otherOwner);
+          }
+        }
       }
     }
   }
 
-  // Remove duplicates
-  for (const [issueNumber, conflictList] of conflicts.entries()) {
-    conflicts.set(issueNumber, Array.from(new Set(conflictList)));
+  // Convert Sets to arrays for return type
+  const result = new Map<number, number[]>();
+  for (const [issueNumber, conflictSet] of conflicts.entries()) {
+    result.set(issueNumber, Array.from(conflictSet));
   }
 
-  if (conflicts.size > 0) {
+  if (result.size > 0) {
     logger.warn('File conflicts detected', {
-      conflictCount: conflicts.size,
-      conflicts: Array.from(conflicts.entries()).map(([issue, conflicting]) => ({
+      conflictCount: result.size,
+      conflicts: Array.from(result.entries()).map(([issue, conflicting]) => ({
         issue,
         conflictsWith: conflicting,
       })),
     });
   }
 
-  return conflicts;
+  return result;
+}
+
+/**
+ * Clear the extraction cache.
+ * Useful for testing or to free memory.
+ */
+export function clearExtractionCache(): void {
+  extractionCache.clear();
 }
 
 /**

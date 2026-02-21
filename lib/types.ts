@@ -163,6 +163,15 @@ export const TelegramConfigSchema = z.object({
 export const DashboardConfigSchema = z.object({
   enabled: z.boolean().default(false),
   port: z.number().int().min(1).max(65535).default(3030),
+  auth: z.object({
+    enabled: z.boolean().default(false),
+    type: z.enum(['basic', 'token', 'both']).default('basic'),
+    // Basic auth credentials
+    username: z.string().optional(),
+    password: z.string().optional(),
+    // Token auth
+    token: z.string().optional(),
+  }).optional(),
 });
 
 /**
@@ -222,6 +231,42 @@ export interface GitHubIssue {
   created_at: string;
   updated_at: string;
   html_url: string;
+}
+
+/**
+ * Zod schema for runtime validation of GitHub issue data.
+ */
+export const GitHubIssueSchema = z.object({
+  number: z.number().int().positive(),
+  title: z.string().min(1),
+  body: z.string(),
+  labels: z.array(
+    z.union([
+      z.string(), // Simple label string
+      z.object({ name: z.string() }) // Label object
+    ])
+  ).transform(labels => labels.map(l => typeof l === 'string' ? l : l.name)),
+  state: z.enum(['open', 'closed']),
+  assignee: z.union([z.string(), z.null(), z.undefined()]).optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  html_url: z.string().url(),
+}).strict();
+
+/**
+ * Validate GitHub issue data from API response.
+ */
+export function validateGitHubIssue(data: unknown): GitHubIssue {
+  try {
+    return GitHubIssueSchema.parse(data);
+  } catch (err) {
+    throw new ValidationError(
+      'Invalid GitHub issue data structure',
+      'Check that the GitHub API response matches the expected schema. This may indicate an API version mismatch.',
+      ErrorCode.GITHUB_VALIDATION,
+      { data, zodError: err instanceof Error ? err.message : String(err) }
+    );
+  }
 }
 
 // --- Domain Classification ---
@@ -349,12 +394,48 @@ export interface CliOptions {
 // --- Error Types ---
 
 /**
- * Base error class for validation errors.
+ * Structured error codes for programmatic error handling.
+ */
+export enum ErrorCode {
+  // Validation errors
+  INVALID_MODEL = 'INVALID_MODEL',
+  INVALID_BUDGET = 'INVALID_BUDGET',
+  INVALID_PROMPT = 'INVALID_PROMPT',
+  INVALID_SESSION_ID = 'INVALID_SESSION_ID',
+  INVALID_CONFIG = 'INVALID_CONFIG',
+
+  // Runtime errors
+  AGENT_TIMEOUT = 'AGENT_TIMEOUT',
+  AGENT_CRASHED = 'AGENT_CRASHED',
+  RATE_LIMIT_EXCEEDED = 'RATE_LIMIT_EXCEEDED',
+  BUDGET_EXCEEDED = 'BUDGET_EXCEEDED',
+  NETWORK_ERROR = 'NETWORK_ERROR',
+
+  // GitHub errors
+  GITHUB_NOT_FOUND = 'GITHUB_NOT_FOUND',
+  GITHUB_FORBIDDEN = 'GITHUB_FORBIDDEN',
+  GITHUB_RATE_LIMIT = 'GITHUB_RATE_LIMIT',
+  GITHUB_AUTHENTICATION = 'GITHUB_AUTHENTICATION',
+  GITHUB_VALIDATION = 'GITHUB_VALIDATION',
+
+  // Worktree errors
+  WORKTREE_CREATE_FAILED = 'WORKTREE_CREATE_FAILED',
+  WORKTREE_CLEANUP_FAILED = 'WORKTREE_CLEANUP_FAILED',
+  WORKTREE_BRANCH_EXISTS = 'WORKTREE_BRANCH_EXISTS',
+
+  // Unknown/Other
+  UNKNOWN = 'UNKNOWN',
+}
+
+/**
+ * Enhanced validation error with error code and metadata.
  */
 export class ValidationError extends Error {
   constructor(
     message: string,
     public readonly recoveryHint: string,
+    public readonly code: ErrorCode = ErrorCode.INVALID_CONFIG,
+    public readonly metadata?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'ValidationError';
@@ -362,12 +443,14 @@ export class ValidationError extends Error {
 }
 
 /**
- * Agent operation failed (timeout, API error, etc.).
+ * Enhanced agent operation error with error code and retryable flag.
  */
 export class AgentError extends Error {
   constructor(
     message: string,
-    public readonly recoveryHint: string,
+    public readonly code: ErrorCode,
+    public readonly metadata?: Record<string, unknown>,
+    public readonly retryable: boolean = false,
   ) {
     super(message);
     this.name = 'AgentError';
@@ -375,12 +458,14 @@ export class AgentError extends Error {
 }
 
 /**
- * Worktree operation failed.
+ * Enhanced worktree operation error with error code and path.
  */
 export class WorktreeError extends Error {
   constructor(
     message: string,
+    public readonly code: ErrorCode,
     public readonly path?: string,
+    public readonly metadata?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'WorktreeError';
@@ -388,15 +473,49 @@ export class WorktreeError extends Error {
 }
 
 /**
- * GitHub API error.
+ * Enhanced GitHub API error with error code and status.
  */
 export class GitHubError extends Error {
   constructor(
     message: string,
+    public readonly code: ErrorCode,
     public readonly statusCode?: number,
+    public readonly metadata?: Record<string, unknown>,
+    public readonly retryable: boolean = false,
   ) {
     super(message);
     this.name = 'GitHubError';
+  }
+}
+
+/**
+ * Rate limit exceeded error with reset timestamp.
+ */
+export class RateLimitError extends AgentError {
+  constructor(public readonly resetAt: number, public readonly remaining: number = 0) {
+    super(
+      `Rate limit exceeded. Resets at ${new Date(resetAt * 1000).toISOString()}`,
+      ErrorCode.RATE_LIMIT_EXCEEDED,
+      { resetAt, remaining },
+      true // retryable
+    );
+    this.name = 'RateLimitError';
+  }
+}
+
+/**
+ * Budget exceeded error with cost details.
+ */
+export class BudgetExceededError extends AgentError {
+  constructor(spent: number, max: number, taskNumber?: number) {
+    const taskInfo = taskNumber ? ` (task #${taskNumber})` : '';
+    super(
+      `Budget exceeded: $${spent.toFixed(2)} spent, $${max.toFixed(2)} max${taskInfo}`,
+      ErrorCode.BUDGET_EXCEEDED,
+      { spent, max, taskNumber, overage: spent - max },
+      false // NOT retryable
+    );
+    this.name = 'BudgetExceededError';
   }
 }
 

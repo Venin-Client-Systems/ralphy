@@ -103,7 +103,18 @@ export class AgentErrorClassifier {
       };
     }
 
-    // Unknown error type
+    // Authentication/authorization errors (non-retryable)
+    if (msg.includes('unauthorized') || msg.includes('forbidden') || msg.includes('authentication') || msg.includes('invalid credentials')) {
+      return {
+        type: 'unknown', // Keep as unknown for now, could add 'auth' type if needed
+        message: error.message,
+        retryable: false,
+        recoveryHint: 'Authentication/authorization error. Check API credentials and permissions.',
+        originalError: error,
+      };
+    }
+
+    // Unknown error type (default to retryable for safety)
     return {
       type: 'unknown',
       message: error.message,
@@ -254,6 +265,85 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Retry metrics for observability.
+ */
+export interface RetryMetrics {
+  operation: string;
+  attempts: number;
+  successes: number;
+  failures: number;
+  errorsByType: Record<AgentErrorType, number>;
+  lastError?: ClassifiedError;
+  lastAttemptAt?: number;
+}
+
+/**
+ * Observer for error boundary operations.
+ * Collects metrics on retries, circuit breaker state, and error patterns.
+ */
+export class ErrorBoundaryObserver {
+  private metrics = new Map<string, RetryMetrics>();
+
+  /**
+   * Record an attempt (success or failure).
+   */
+  recordAttempt(label: string, error?: ClassifiedError): void {
+    const metric = this.metrics.get(label) || {
+      operation: label,
+      attempts: 0,
+      successes: 0,
+      failures: 0,
+      errorsByType: {} as Record<AgentErrorType, number>,
+    };
+
+    metric.attempts++;
+    metric.lastAttemptAt = Date.now();
+
+    if (error) {
+      metric.failures++;
+      metric.errorsByType[error.type] = (metric.errorsByType[error.type] || 0) + 1;
+      metric.lastError = error;
+    } else {
+      metric.successes++;
+    }
+
+    this.metrics.set(label, metric);
+  }
+
+  /**
+   * Get all collected metrics.
+   */
+  getMetrics(): RetryMetrics[] {
+    return Array.from(this.metrics.values());
+  }
+
+  /**
+   * Get metrics for a specific operation.
+   */
+  getMetric(label: string): RetryMetrics | undefined {
+    return this.metrics.get(label);
+  }
+
+  /**
+   * Get circuit breaker state info.
+   */
+  getCircuitBreakerState(breaker: CircuitBreaker): {
+    state: 'closed' | 'open' | 'half_open';
+    failureCount: number;
+    threshold: number;
+  } {
+    return breaker.getState();
+  }
+
+  /**
+   * Clear all metrics (useful for testing).
+   */
+  clear(): void {
+    this.metrics.clear();
+  }
+}
+
+/**
  * Enhanced retry wrapper with error classification, exponential backoff, and circuit breaker.
  *
  * @param fn - The async function to execute
@@ -270,6 +360,7 @@ export async function withErrorBoundary<T>(
     maxRetries?: number;
     baseDelayMs?: number;
     maxDelayMs?: number;
+    observer?: ErrorBoundaryObserver;
   } = {},
   circuitBreaker?: CircuitBreaker,
 ): Promise<T> {
@@ -296,11 +387,15 @@ export async function withErrorBoundary<T>(
       // Success! Reset backoff and record in circuit breaker
       backoff.reset();
       circuitBreaker?.recordSuccess();
+      options.observer?.recordAttempt(label); // Record success
 
       return result;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       const classified = AgentErrorClassifier.classify(error);
+
+      // Record failure in observer
+      options.observer?.recordAttempt(label, classified);
 
       // Log classified error with recovery hint
       logger.warn(`${label}: operation failed`, {
