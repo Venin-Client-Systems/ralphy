@@ -121,9 +121,15 @@ const DashboardInner: React.FC<DashboardProps> = ({
             {' | '}
             Failed: <Text color="red">{failed.length}</Text>
           </Text>
+          {pending.length > 0 && (
+            <Text color="gray" dimColor>
+              ⏸ Queued: {pending.slice(0, 3).map(t => `#${t.issueNumber} [${t.domain}]`).join(', ')}
+              {pending.length > 3 && ` +${pending.length - 3} more`}
+            </Text>
+          )}
           {completed.length > 0 && (
             <Text color="gray" dimColor>
-              ✓ Recently completed: {completed.slice(-3).map(t => `#${t.issueNumber}`).join(', ')}
+              ✓ Completed: {completed.slice(-3).map(t => `#${t.issueNumber}`).join(', ')}
             </Text>
           )}
         </Box>
