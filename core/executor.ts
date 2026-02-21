@@ -955,9 +955,17 @@ Focus only on implementing: ${task.title}`;
  * Build the system prompt for the agent.
  */
 function buildSystemPrompt(task: Task): string {
-  return `You are a software engineer working on issue #${task.issueNumber}.
-Your goal is to implement the requested changes, write tests, and commit your work.
-Stay focused on the task scope and avoid unnecessary changes.`;
+  return `You are a software engineer tasked with implementing issue #${task.issueNumber}.
+
+CRITICAL REQUIREMENTS:
+1. Read the issue body carefully and implement ALL requested changes
+2. Make the necessary code changes to fix/implement the issue
+3. Test your changes to ensure they work
+4. Commit your work with a clear commit message
+5. Push the branch so a PR can be created
+
+You MUST create commits. Do not just analyze - actually implement the solution and commit it.
+Stay focused on the issue scope. Avoid unrelated changes.`;
 }
 
 /**
