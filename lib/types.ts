@@ -189,6 +189,11 @@ export type DashboardConfig = z.infer<typeof DashboardConfigSchema>;
 // --- GitHub Issue Schemas ---
 
 /**
+ * Complexity estimate for a task.
+ */
+export type TaskComplexity = 'simple' | 'medium' | 'complex';
+
+/**
  * Schema for a GitHub issue payload.
  */
 export const IssuePayloadSchema = z.object({
@@ -196,6 +201,10 @@ export const IssuePayloadSchema = z.object({
   body: z.string(),
   labels: z.array(z.string()).default([]),
   assignee: z.string().optional(),
+  metadata: z.object({
+    depends_on: z.array(z.number()).default([]),
+    complexity: z.enum(['simple', 'medium', 'complex']).default('medium'),
+  }).optional(),
 });
 
 export type IssuePayload = z.infer<typeof IssuePayloadSchema>;
@@ -263,6 +272,13 @@ export interface Task {
   startedAt?: Date;
   completedAt?: Date;
   error?: string;
+  metadata?: {
+    depends_on?: number[];
+    complexity?: TaskComplexity;
+    linesAdded?: number;
+    linesRemoved?: number;
+    filesChanged?: number;
+  };
 }
 
 // --- Session State ---

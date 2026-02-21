@@ -229,13 +229,31 @@ Fetches all open issues labeled `autoissue-1`, classifies their domains, and pro
 
 ### Planner Mode (Directive to Issues)
 
-*(Coming Soon)*
-
 ```bash
 autoissue --directive "Build JWT authentication with refresh tokens"
 ```
 
-Uses AI to break the directive into GitHub issues, then processes them.
+Uses AI to break the directive into GitHub issues with automatic dependency tracking, then processes them in the correct order.
+
+**Features:**
+- AI decomposes complex directives into discrete tasks
+- Automatically creates GitHub issues with proper labels
+- Builds dependency graph to prevent execution deadlocks
+- Visualizes dependencies as ASCII art and Mermaid diagrams
+- Executes tasks in topological order (dependencies first)
+
+**Dependency Graph Output:**
+```
+📊 Dependency Graph:
+────────────────────────────────────────────────────────────
+  #42 ← depends on [41] → blocks [43]
+  #41 → blocks [42, 43]
+  #43 ← depends on [41, 42]
+────────────────────────────────────────────────────────────
+📊 Dependency graph saved: ~/.autoissue/dep-graph-abc123.html
+```
+
+Open the HTML file in a browser to view the interactive Mermaid diagram.
 
 ### Headless Mode
 
@@ -332,6 +350,8 @@ Create `autoissue.config.json`:
 
 #### Dashboard Server
 
+Enable the real-time web dashboard to monitor execution progress:
+
 ```json
 {
   "dashboard": {
@@ -340,6 +360,20 @@ Create `autoissue.config.json`:
   }
 }
 ```
+
+Or via CLI:
+
+```bash
+autoissue --issues autoissue-1 --dashboard
+```
+
+The dashboard provides:
+- Real-time task status updates (running, completed, failed)
+- Live cost tracking
+- Task metadata (domain, PR number, duration)
+- WebSocket-based updates (no polling)
+
+Access at `http://localhost:3030` while Autoissue is running. The server automatically shuts down 5 seconds after execution completes.
 
 ## Domain Classification
 

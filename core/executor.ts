@@ -34,6 +34,96 @@ import {
 } from './scheduler.js';
 import { createWorktree, cleanupWorktree } from './worktree.js';
 import { spawnAgent } from './agent.js';
+import { saveState } from './state.js';
+import { startUI, updateUI, stopUI } from '../ui/cli-ui.js';
+import { selectOptimalModel } from '../lib/model-selector.js';
+import { analyzeError, enhancePrompt, calculateBackoff, sleep } from '../lib/smart-retry.js';
+import { detectConflicts } from '../lib/conflict-detector.js';
+import { decomposeDirective } from './planner.js';
+import { DependencyGraph } from '../lib/dependency-graph.js';
+import { startDashboardServer, broadcastUpdate } from '../server/dashboard.js';
+import { homedir } from 'os';
+import { join } from 'path';
+
+/**
+ * Resume execution from a previous session.
+ *
+ * Main entry point for resume mode: `autoissue --resume`
+ */
+export async function resumeExecution(
+  session: SessionState,
+  incompleteTasks: Task[],
+  options?: { headless?: boolean; dashboard?: boolean }
+): Promise<SessionState> {
+  logger.info('Resuming execution session', {
+    sessionId: session.sessionId,
+    incompleteTasks: incompleteTasks.length
+  });
+
+  session.status = 'running';
+
+  // Start dashboard server if enabled
+  let stopDashboard: (() => void) | null = null;
+  if (options?.dashboard || session.config.dashboard?.enabled) {
+    stopDashboard = startDashboardServer(session.config.dashboard?.port || 3030);
+  }
+
+  try {
+    // Create scheduler
+    const scheduler = createScheduler(session.config.executor.maxParallel);
+
+    // Enqueue only incomplete tasks
+    enqueueTasks(scheduler, incompleteTasks);
+
+    // Start TUI if not headless
+    const isHeadless = options?.headless ?? true;
+    if (!isHeadless) {
+      startUI(session);
+    }
+
+    // Execute with sliding window
+    await executeSlidingWindow(scheduler, session, session.config, isHeadless, stopDashboard);
+
+    // Mark session complete
+    session.status = 'completed';
+    session.completedAt = new Date().toISOString();
+
+    // Broadcast final state
+    if (stopDashboard) {
+      broadcastUpdate(session);
+    }
+
+    // Stop TUI
+    if (!isHeadless) {
+      stopUI();
+    }
+
+    const summary = getSummary(scheduler);
+    logger.info('Resume complete', {
+      sessionId: session.sessionId,
+      ...summary,
+      totalCost: session.totalCost,
+    });
+
+    // Print execution summary
+    printExecutionSummary(session);
+
+    return session;
+  } catch (err) {
+    logger.error('Resume failed', {
+      sessionId: session.sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    session.status = 'failed';
+    session.completedAt = new Date().toISOString();
+    throw err;
+  } finally {
+    // Keep dashboard open for 5s to show final state
+    if (stopDashboard) {
+      setTimeout(() => stopDashboard!(), 5000);
+    }
+  }
+}
 
 /**
  * Execute issues with the given label.
@@ -42,7 +132,8 @@ import { spawnAgent } from './agent.js';
  */
 export async function executeIssues(
   label: string,
-  config: AutoissueConfig
+  config: AutoissueConfig,
+  options?: { headless?: boolean; dashboard?: boolean }
 ): Promise<SessionState> {
   const sessionId = nanoid();
   logger.info('Starting execution session', { sessionId, label });
@@ -57,6 +148,12 @@ export async function executeIssues(
     startedAt: new Date().toISOString(),
     config,
   };
+
+  // Start dashboard server if enabled
+  let stopDashboard: (() => void) | null = null;
+  if (options?.dashboard || config.dashboard?.enabled) {
+    stopDashboard = startDashboardServer(config.dashboard?.port || 3030);
+  }
 
   try {
     // Step 1: Fetch issues from GitHub
@@ -85,6 +182,15 @@ export async function executeIssues(
     });
 
     session.tasks = tasks;
+
+    // Step 2.1: Detect file conflicts between tasks
+    const conflicts = detectConflicts(tasks);
+    if (conflicts.size > 0) {
+      logger.warn('File conflicts detected between tasks', {
+        conflictCount: conflicts.size,
+        details: Array.from(conflicts.entries()),
+      });
+    }
     logger.info('Tasks classified', {
       tasks: tasks.map((t) => ({
         issue: t.issueNumber,
@@ -92,16 +198,46 @@ export async function executeIssues(
       })),
     });
 
+    // Step 2.5: Predict total cost
+    const estimatedCost = tasks.length * config.agent.maxBudgetUsd;
+    if (config.maxTotalBudgetUsd && estimatedCost > config.maxTotalBudgetUsd) {
+      const error = `Estimated cost ($${estimatedCost.toFixed(2)}) exceeds budget ($${config.maxTotalBudgetUsd.toFixed(2)})`;
+      logger.error('Budget exceeded', { estimatedCost, budget: config.maxTotalBudgetUsd });
+      throw new Error(error);
+    }
+    logger.info('Cost prediction', {
+      tasks: tasks.length,
+      estimatedCost: `$${estimatedCost.toFixed(2)}`,
+      budget: config.maxTotalBudgetUsd ? `$${config.maxTotalBudgetUsd.toFixed(2)}` : 'unlimited',
+      remaining: config.maxTotalBudgetUsd ? `$${(config.maxTotalBudgetUsd - estimatedCost).toFixed(2)}` : 'N/A',
+    });
+
     // Step 3: Create scheduler
     const scheduler = createScheduler(config.executor.maxParallel);
     enqueueTasks(scheduler, tasks);
 
+    // Step 3.5: Start TUI if not headless
+    const isHeadless = options?.headless ?? true;
+    if (!isHeadless) {
+      startUI(session);
+    }
+
     // Step 4: Execute with sliding window
-    await executeSlidingWindow(scheduler, session, config);
+    await executeSlidingWindow(scheduler, session, config, isHeadless, stopDashboard);
 
     // Mark session complete
     session.status = 'completed';
     session.completedAt = new Date().toISOString();
+
+    // Broadcast final state
+    if (stopDashboard) {
+      broadcastUpdate(session);
+    }
+
+    // Stop TUI
+    if (!isHeadless) {
+      stopUI();
+    }
 
     const summary = getSummary(scheduler);
     logger.info('Execution complete', {
@@ -109,6 +245,9 @@ export async function executeIssues(
       ...summary,
       totalCost: session.totalCost,
     });
+
+    // Print execution summary
+    printExecutionSummary(session);
 
     return session;
   } catch (err) {
@@ -119,7 +258,347 @@ export async function executeIssues(
     session.status = 'failed';
     session.completedAt = new Date().toISOString();
     throw err;
+  } finally {
+    // Keep dashboard open for 5s to show final state
+    if (stopDashboard) {
+      setTimeout(() => stopDashboard!(), 5000);
+    }
   }
+}
+
+/**
+ * Execute in planner mode: directive → AI decomposition → GitHub issues → execution.
+ *
+ * Main entry point for planner mode: `autoissue --directive "Build user auth system"`
+ */
+export async function executePlannerMode(
+  directive: string,
+  config: AutoissueConfig,
+  options?: { headless?: boolean; dryRun?: boolean; dashboard?: boolean }
+): Promise<SessionState> {
+  if (!config.planner?.enabled) {
+    throw new Error('Planner mode not enabled in config');
+  }
+
+  const sessionId = nanoid();
+  logger.info('Starting planner mode', { sessionId, directive });
+
+  // Initialize session state
+  const session: SessionState = {
+    sessionId,
+    status: 'running',
+    directive,
+    tasks: [],
+    totalCost: 0,
+    startedAt: new Date().toISOString(),
+    config,
+  };
+
+  // Start dashboard server if enabled
+  let stopDashboard: (() => void) | null = null;
+  if (options?.dashboard || config.dashboard?.enabled) {
+    stopDashboard = startDashboardServer(config.dashboard?.port || 3030);
+  }
+
+  try {
+    // Step 1: Decompose directive into issues using AI
+    logger.info('Decomposing directive with AI', { directive });
+    const plannerResult = await decomposeDirective(directive, config.planner, config.project.repo);
+
+    session.totalCost += plannerResult.cost;
+
+    logger.info('Directive decomposed', {
+      issueCount: plannerResult.issues.length,
+      plannerCost: plannerResult.cost,
+      duration: plannerResult.durationMs,
+    });
+
+    if (options?.dryRun) {
+      console.log('\n📋 Dry-run: Issues to be created:\n');
+      plannerResult.issues.forEach((issue, index) => {
+        console.log(`${index + 1}. ${issue.title}`);
+        console.log(`   Labels: ${issue.labels.join(', ')}`);
+        console.log(
+          `   Complexity: ${issue.metadata?.complexity || 'medium'}`
+        );
+        if (issue.metadata?.depends_on && issue.metadata.depends_on.length > 0) {
+          console.log(`   Depends on: ${issue.metadata.depends_on.map((d) => `#${d}`).join(', ')}`);
+        }
+        console.log();
+      });
+      console.log(`\nPlanner cost: $${plannerResult.cost.toFixed(2)}`);
+      session.status = 'completed';
+      session.completedAt = new Date().toISOString();
+      return session;
+    }
+
+    // Step 2: Create GitHub issues
+    logger.info('Creating GitHub issues', { count: plannerResult.issues.length });
+
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+
+    const createdIssues: number[] = [];
+    const issueIndexToNumber = new Map<number, number>(); // Map array index to actual issue number
+
+    for (let i = 0; i < plannerResult.issues.length; i++) {
+      const payload = plannerResult.issues[i];
+
+      // Build labels argument
+      const labels = [...payload.labels];
+      const labelsArg = labels.map((l) => ['--label', l]).flat();
+
+      // Create issue
+      const { stdout } = await execFileAsync(
+        'gh',
+        [
+          'issue',
+          'create',
+          '--repo',
+          config.project.repo,
+          '--title',
+          payload.title,
+          '--body',
+          payload.body,
+          ...labelsArg,
+        ],
+        { encoding: 'utf-8' }
+      );
+
+      // Extract issue number from output
+      const match = stdout.match(/\/issues\/(\d+)/);
+      if (match) {
+        const issueNumber = parseInt(match[1], 10);
+        createdIssues.push(issueNumber);
+        issueIndexToNumber.set(i + 1, issueNumber); // Map 1-indexed to actual number
+
+        logger.info('Issue created', {
+          number: issueNumber,
+          title: payload.title,
+          labels: payload.labels,
+        });
+      }
+    }
+
+    if (createdIssues.length === 0) {
+      throw new Error('Failed to create any issues');
+    }
+
+    logger.info('All issues created', { count: createdIssues.length });
+
+    // Step 3: Build dependency graph
+    const depGraph = new DependencyGraph();
+    const tasks: Task[] = [];
+
+    for (let i = 0; i < plannerResult.issues.length; i++) {
+      const payload = plannerResult.issues[i];
+      const issueNumber = createdIssues[i];
+
+      // Map depends_on indices to actual issue numbers
+      const dependsOn =
+        payload.metadata?.depends_on?.map((idx) => issueIndexToNumber.get(idx) || 0).filter((n) => n > 0) || [];
+
+      // Classify domain
+      const classification = classifyIssue({
+        number: issueNumber,
+        title: payload.title,
+        body: payload.body,
+        labels: payload.labels,
+        state: 'open',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        html_url: '',
+      });
+
+      const task: Task = {
+        issueNumber,
+        title: payload.title,
+        body: payload.body,
+        labels: payload.labels,
+        domain: classification.domain,
+        status: 'pending',
+        metadata: {
+          depends_on: dependsOn,
+          complexity: payload.metadata?.complexity || 'medium',
+        },
+      };
+
+      tasks.push(task);
+      depGraph.addTask(task, dependsOn);
+    }
+
+    // Check for cycles
+    if (depGraph.hasCycles()) {
+      throw new Error('Dependency graph has cycles - cannot execute');
+    }
+
+    session.tasks = tasks;
+
+    // Step 3.5: Display and save dependency graph
+    if (depGraph && tasks.length > 0) {
+      console.log(depGraph.visualize());
+
+      // Save Mermaid diagram
+      const outputPath = join(homedir(), '.autoissue', `dep-graph-${sessionId}.html`);
+      depGraph.saveMermaidDiagram(outputPath);
+      console.log(`📊 Dependency graph saved: ${outputPath}\n`);
+    }
+
+    // Step 4: Execute with dependency-aware scheduling
+    logger.info('Starting dependency-aware execution', {
+      totalTasks: tasks.length,
+      maxParallel: config.executor.maxParallel,
+    });
+
+    // Create scheduler
+    const scheduler = createScheduler(config.executor.maxParallel);
+
+    // Start TUI if not headless
+    const isHeadless = options?.headless ?? true;
+    if (!isHeadless) {
+      startUI(session);
+    }
+
+    // Execute with dependency awareness
+    await executeDependencyAware(scheduler, session, config, depGraph, isHeadless, stopDashboard);
+
+    // Mark session complete
+    session.status = 'completed';
+    session.completedAt = new Date().toISOString();
+
+    // Broadcast final state
+    if (stopDashboard) {
+      broadcastUpdate(session);
+    }
+
+    // Stop TUI
+    if (!isHeadless) {
+      stopUI();
+    }
+
+    const summary = getSummary(scheduler);
+    logger.info('Planner mode execution complete', {
+      sessionId,
+      ...summary,
+      totalCost: session.totalCost,
+    });
+
+    // Print execution summary
+    printExecutionSummary(session);
+
+    return session;
+  } catch (err) {
+    logger.error('Planner mode execution failed', {
+      sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    session.status = 'failed';
+    session.completedAt = new Date().toISOString();
+    throw err;
+  } finally {
+    // Keep dashboard open for 5s to show final state
+    if (stopDashboard) {
+      setTimeout(() => stopDashboard!(), 5000);
+    }
+  }
+}
+
+/**
+ * Execute tasks with dependency awareness using the dependency graph.
+ */
+async function executeDependencyAware(
+  scheduler: SchedulerState,
+  session: SessionState,
+  config: AutoissueConfig,
+  depGraph: DependencyGraph,
+  isHeadless: boolean,
+  stopDashboard?: (() => void) | null
+): Promise<void> {
+  logger.info('Starting dependency-aware execution');
+
+  const runningTasks = new Map<number, Promise<void>>();
+  const completedIssues = new Set<number>();
+
+  const scheduleNext = () => {
+    // Get ready tasks (all dependencies met)
+    const readyIssues = depGraph.getReadyTasks(completedIssues);
+
+    // Filter to tasks that are pending and not already running
+    const availableTasks = session.tasks.filter(
+      (t) =>
+        readyIssues.includes(t.issueNumber) &&
+        t.status === 'pending' &&
+        !runningTasks.has(t.issueNumber)
+    );
+
+    // Fill available slots
+    const occupiedSlots = scheduler.slots.filter((s) => s.task !== null).length;
+    const slotsAvailable = scheduler.maxSlots - occupiedSlots;
+    const tasksToStart = availableTasks.slice(0, slotsAvailable);
+
+    for (const task of tasksToStart) {
+      logger.info('Starting task (dependencies met)', {
+        issueNumber: task.issueNumber,
+        dependsOn: task.metadata?.depends_on || [],
+      });
+
+      // Find an empty slot
+      const emptySlot = scheduler.slots.find((s) => s.task === null);
+      if (emptySlot) {
+        emptySlot.task = task;
+        emptySlot.startedAt = new Date();
+      }
+
+      const promise = executeTask(task, config, scheduler, session, isHeadless, stopDashboard)
+        .then(() => {
+          completedIssues.add(task.issueNumber);
+        })
+        .catch((err) => {
+          logger.error('Task execution failed', {
+            issueNumber: task.issueNumber,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => {
+          // Clear the slot
+          const slot = scheduler.slots.find((s) => s.task?.issueNumber === task.issueNumber);
+          if (slot) {
+            slot.task = null;
+            slot.startedAt = null;
+          }
+
+          runningTasks.delete(task.issueNumber);
+          scheduleNext(); // Immediately try to fill the slot
+        });
+
+      runningTasks.set(task.issueNumber, promise);
+    }
+  };
+
+  // Initial scheduling
+  scheduleNext();
+
+  // Wait for all tasks to complete
+  while (runningTasks.size > 0 || completedIssues.size < session.tasks.length) {
+    if (runningTasks.size > 0) {
+      await Promise.race([...runningTasks.values(), new Promise((resolve) => setTimeout(resolve, 100))]);
+    } else {
+      // Check if we're stuck (tasks pending but none ready)
+      const pendingTasks = session.tasks.filter((t) => t.status === 'pending');
+      if (pendingTasks.length > 0) {
+        const blockedTasks = depGraph.getBlockedTasks();
+        logger.error('Execution stuck - tasks pending but blocked', {
+          pending: pendingTasks.map((t) => t.issueNumber),
+          blocked: Array.from(blockedTasks.entries()),
+        });
+        throw new Error('Execution stuck: tasks are blocked by incomplete dependencies');
+      }
+      break;
+    }
+  }
+
+  logger.info('Dependency-aware execution complete');
 }
 
 /**
@@ -128,15 +607,16 @@ export async function executeIssues(
 async function fetchIssuesByLabel(repo: string, label: string): Promise<GitHubIssue[]> {
   logger.debug('Fetching issues', { repo, label });
 
-  const { exec } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const execAsync = promisify(exec);
-
   try {
-    // Use gh CLI to fetch issues
-    const { stdout } = await execAsync(
-      `gh issue list --repo ${repo} --label "${label}" --state open --json number,title,body,labels,state,assignees,createdAt,updatedAt,url --limit 100`
-    );
+    // Use gh CLI to fetch issues via githubClient (handles rate limits)
+    const stdout = await githubClient.execForStdout([
+      'issue', 'list',
+      '--repo', repo,
+      '--label', label,
+      '--state', 'open',
+      '--json', 'number,title,body,labels,state,assignees,createdAt,updatedAt,url',
+      '--limit', '100'
+    ]);
 
     const rawIssues = JSON.parse(stdout);
 
@@ -171,46 +651,54 @@ async function fetchIssuesByLabel(repo: string, label: string): Promise<GitHubIs
 }
 
 /**
- * Execute tasks using the sliding window scheduler.
+ * Execute tasks using the sliding window scheduler with event-driven execution.
  */
 async function executeSlidingWindow(
   scheduler: SchedulerState,
   session: SessionState,
-  config: AutoissueConfig
+  config: AutoissueConfig,
+  isHeadless: boolean,
+  stopDashboard?: (() => void) | null
 ): Promise<void> {
   logger.info('Starting sliding window execution', {
     maxSlots: scheduler.maxSlots,
     totalTasks: scheduler.queue.length,
   });
 
-  // Initial fill
-  const initialTasks = fillSlots(scheduler);
-  for (const task of initialTasks) {
-    executeTask(task, config, scheduler, session).catch((err) => {
-      logger.error('Task execution failed', {
-        issueNumber: task.issueNumber,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }
+  const runningTasks = new Map<number, Promise<void>>();
 
-  // Main loop: wait for tasks to complete, then fill slots
-  while (hasWork(scheduler)) {
-    await sleep(1000); // Poll every second
-
-    // Log status periodically
-    const status = getSchedulerStatus(scheduler);
-    logger.debug('Scheduler status', status);
-
-    // Try to fill any free slots
-    const newTasks = fillSlots(scheduler);
-    for (const task of newTasks) {
-      executeTask(task, config, scheduler, session).catch((err) => {
-        logger.error('Task execution failed', {
-          issueNumber: task.issueNumber,
-          error: err instanceof Error ? err.message : String(err),
+  const scheduleNext = () => {
+    const available = fillSlots(scheduler);
+    for (const task of available) {
+      const promise = executeTask(task, config, scheduler, session, isHeadless, stopDashboard)
+        .catch((err) => {
+          logger.error('Task execution failed', {
+            issueNumber: task.issueNumber,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => {
+          runningTasks.delete(task.issueNumber);
+          scheduleNext(); // Immediately try to fill the slot
         });
-      });
+
+      runningTasks.set(task.issueNumber, promise);
+    }
+  };
+
+  // Initial scheduling
+  scheduleNext();
+
+  // Wait for all tasks to complete
+  while (runningTasks.size > 0 || hasWork(scheduler)) {
+    if (runningTasks.size > 0) {
+      await Promise.race([
+        ...runningTasks.values(),
+        new Promise(resolve => setTimeout(resolve, 100))
+      ]);
+    } else {
+      // No tasks running but queue has work - should not happen, but safeguard
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
 
@@ -226,11 +714,18 @@ async function executeTask(
   task: Task,
   config: AutoissueConfig,
   scheduler: SchedulerState,
-  session: SessionState
+  session: SessionState,
+  isHeadless: boolean,
+  stopDashboard?: (() => void) | null
 ): Promise<void> {
   const startTime = Date.now();
   task.status = 'running';
   task.startedAt = new Date();
+
+  // Broadcast status update
+  if (stopDashboard) {
+    broadcastUpdate(session);
+  }
 
   logger.info('Task started', { issueNumber: task.issueNumber });
 
@@ -255,31 +750,115 @@ async function executeTask(
     });
 
     // Step 2: Build prompt for agent
-    const prompt = buildTaskPrompt(task);
+    let currentPrompt = buildTaskPrompt(task);
 
-    // Step 3: Spawn agent in worktree
-    const response = await spawnAgent(prompt, {
-      model: config.agent.model,
-      maxBudgetUsd: config.agent.maxBudgetUsd,
-      systemPrompt: buildSystemPrompt(task),
-      cwd: worktree.path,
-      yolo: config.agent.yolo,
-      maxTurns: config.agent.maxTurns,
-      timeoutMs: config.executor.timeoutMinutes * 60 * 1000,
-    });
-
-    task.agentSessionId = response.sessionId;
-    task.costUsd = response.costUsd;
-    session.totalCost += response.costUsd;
-
-    logger.info('Agent completed', {
+    // Step 2.5: Select optimal model based on task complexity
+    const selectedModel = selectOptimalModel(task, config.agent);
+    logger.info('Model selected', {
       issueNumber: task.issueNumber,
-      sessionId: response.sessionId,
-      cost: response.costUsd,
-      duration: response.durationMs,
+      model: selectedModel,
+      configuredModel: config.agent.model,
     });
 
-    // Step 4: Create PR (if configured)
+    // Step 3: Spawn agent in worktree with smart retry
+    const MAX_RETRIES = 2;
+    let retries = 0;
+    let lastError: Error | null = null;
+
+    while (retries <= MAX_RETRIES) {
+      try {
+        const response = await spawnAgent(currentPrompt, {
+          model: selectedModel,
+          maxBudgetUsd: config.agent.maxBudgetUsd,
+          systemPrompt: buildSystemPrompt(task),
+          cwd: worktree.path,
+          yolo: config.agent.yolo,
+          maxTurns: config.agent.maxTurns,
+          timeoutMs: config.executor.timeoutMinutes * 60 * 1000,
+        });
+
+        task.agentSessionId = response.sessionId;
+        task.costUsd = response.costUsd;
+        session.totalCost += response.costUsd;
+
+        logger.info('Agent completed', {
+          issueNumber: task.issueNumber,
+          sessionId: response.sessionId,
+          cost: response.costUsd,
+          duration: response.durationMs,
+          attempts: retries + 1,
+        });
+
+        // Update UI after agent completion
+        if (!isHeadless) {
+          updateUI(session);
+        }
+
+        // Success! Break out of retry loop
+        break;
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+
+        if (retries === MAX_RETRIES) {
+          // Out of retries, throw the error
+          throw lastError;
+        }
+
+        // Analyze error to determine if retryable
+        const analysis = analyzeError(lastError.message);
+
+        if (!analysis.retryable) {
+          // Non-retryable error, throw immediately
+          logger.error('Non-retryable error', {
+            issueNumber: task.issueNumber,
+            category: analysis.category,
+            error: lastError.message,
+          });
+          throw lastError;
+        }
+
+        // Retryable error
+        logger.warn('Task failed, retrying with enhanced prompt', {
+          issueNumber: task.issueNumber,
+          attempt: retries + 1,
+          category: analysis.category,
+          error: lastError.message,
+        });
+
+        // Enhance prompt with error context
+        currentPrompt = enhancePrompt(currentPrompt, analysis, retries + 1);
+
+        // Exponential backoff
+        const backoffMs = calculateBackoff(retries);
+        logger.debug('Waiting before retry', {
+          issueNumber: task.issueNumber,
+          backoffMs,
+        });
+        await sleep(backoffMs);
+
+        retries++;
+      }
+    }
+
+    // Step 4: Gather task metrics
+    try {
+      const metrics = await gatherTaskMetrics(worktree.path);
+      task.metadata = {
+        ...task.metadata,
+        linesAdded: metrics.linesAdded,
+        linesRemoved: metrics.linesRemoved,
+        filesChanged: metrics.filesChanged,
+      };
+
+      logger.info('Task metrics', {
+        issueNumber: task.issueNumber,
+        ...metrics
+      });
+    } catch (err) {
+      logger.warn('Failed to gather metrics', { issueNumber: task.issueNumber });
+    }
+
+    // Step 5: Create PR (if configured)
     if (config.executor.createPr) {
       const prNumber = await createPullRequest(task, worktree.branch, config);
       task.prNumber = prNumber;
@@ -290,6 +869,19 @@ async function executeTask(
     task.status = 'completed';
     task.completedAt = new Date();
     completeTask(scheduler, task.issueNumber, true);
+
+    // Broadcast status update
+    if (stopDashboard) {
+      broadcastUpdate(session);
+    }
+
+    // Update UI
+    if (!isHeadless) {
+      updateUI(session);
+    }
+
+    // Save state after completion
+    await saveState(session);
 
     logger.info('Task completed successfully', {
       issueNumber: task.issueNumber,
@@ -305,6 +897,19 @@ async function executeTask(
     task.error = err instanceof Error ? err.message : String(err);
     task.completedAt = new Date();
     completeTask(scheduler, task.issueNumber, false);
+
+    // Broadcast status update
+    if (stopDashboard) {
+      broadcastUpdate(session);
+    }
+
+    // Update UI
+    if (!isHeadless) {
+      updateUI(session);
+    }
+
+    // Save state after failure
+    await saveState(session);
   } finally {
     // Cleanup worktree
     if (worktreeCleanup) {
@@ -365,10 +970,6 @@ async function createPullRequest(
 ): Promise<number> {
   logger.debug('Creating PR', { issueNumber: task.issueNumber, branch });
 
-  const { exec } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const execAsync = promisify(exec);
-
   try {
     // Build PR title and body
     const title = `${task.title}`;
@@ -379,11 +980,21 @@ ${task.body}
 ---
 🤖 Generated by Autoissue`;
 
-    // Create PR via gh CLI
-    const draftFlag = config.executor.prDraft ? '--draft' : '';
-    const { stdout } = await execAsync(
-      `gh pr create --repo ${config.project.repo} --base ${config.project.baseBranch} --head ${branch} --title "${title}" --body "${body}" ${draftFlag}`
-    );
+    // Create PR via gh CLI (with rate limit handling)
+    const args = [
+      'pr', 'create',
+      '--repo', config.project.repo,
+      '--base', config.project.baseBranch,
+      '--head', branch,
+      '--title', title,
+      '--body', body
+    ];
+
+    if (config.executor.prDraft) {
+      args.push('--draft');
+    }
+
+    const stdout = await githubClient.execForStdout(args);
 
     // Extract PR number from output (gh returns URL)
     const match = stdout.match(/\/pull\/(\d+)/);
@@ -408,8 +1019,109 @@ ${task.body}
 }
 
 /**
- * Sleep for the given number of milliseconds.
+ * Gather task metrics (lines changed, files modified).
  */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function gatherTaskMetrics(worktreePath: string): Promise<{
+  linesAdded: number;
+  linesRemoved: number;
+  filesChanged: number;
+}> {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+
+  const { stdout } = await execFileAsync('git', [
+    'diff', '--shortstat', 'HEAD~1', 'HEAD'
+  ], { cwd: worktreePath });
+
+  const match = stdout.match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/);
+
+  return {
+    filesChanged: parseInt(match?.[1] || '0'),
+    linesAdded: parseInt(match?.[2] || '0'),
+    linesRemoved: parseInt(match?.[3] || '0'),
+  };
 }
+
+/**
+ * Print execution summary with PR links and metrics.
+ */
+function printExecutionSummary(session: SessionState): void {
+  const completed = session.tasks.filter(t => t.status === 'completed');
+  const failed = session.tasks.filter(t => t.status === 'failed');
+
+  console.log('\n' + '='.repeat(60));
+  console.log('📊 EXECUTION SUMMARY');
+  console.log('='.repeat(60));
+
+  console.log(`\n✅ Completed: ${completed.length} tasks`);
+  console.log(`❌ Failed: ${failed.length} tasks`);
+  console.log(`💰 Total cost: $${session.totalCost.toFixed(2)}`);
+  console.log(`⏱️  Duration: ${getDuration(session)}`);
+
+  if (completed.length > 0) {
+    console.log('\n✅ Successful PRs:');
+    completed.forEach(t => {
+      const prUrl = `https://github.com/${session.config.project.repo}/pull/${t.prNumber}`;
+      console.log(`  #${t.issueNumber}: ${t.title}`);
+      console.log(`    → PR #${t.prNumber}: ${prUrl}`);
+      console.log(`    💰 Cost: $${(t.costUsd || 0).toFixed(2)}`);
+      if (t.metadata?.linesAdded || t.metadata?.linesRemoved) {
+        console.log(`    📝 Changes: +${t.metadata.linesAdded || 0} -${t.metadata.linesRemoved || 0} lines, ${t.metadata.filesChanged || 0} files`);
+      }
+    });
+  }
+
+  if (failed.length > 0) {
+    console.log('\n❌ Failed Tasks:');
+    failed.forEach(t => {
+      console.log(`  #${t.issueNumber}: ${t.title}`);
+      console.log(`    Error: ${t.error?.slice(0, 100)}`);
+    });
+  }
+
+  // Cost breakdown by domain
+  const costByDomain = new Map<string, number>();
+  for (const task of session.tasks) {
+    const current = costByDomain.get(task.domain) || 0;
+    costByDomain.set(task.domain, current + (task.costUsd || 0));
+  }
+
+  console.log('\n💰 Cost Breakdown by Domain:');
+  for (const [domain, cost] of costByDomain) {
+    const count = session.tasks.filter(t => t.domain === domain).length;
+    console.log(`  ${domain}: $${cost.toFixed(2)} (${count} tasks, avg $${(cost/count).toFixed(2)}/task)`);
+  }
+
+  // Code impact metrics
+  if (completed.length > 0) {
+    const totalLines = completed.reduce((sum, t) =>
+      sum + (t.metadata?.linesAdded || 0) + (t.metadata?.linesRemoved || 0), 0);
+    const totalFiles = completed.reduce((sum, t) =>
+      sum + (t.metadata?.filesChanged || 0), 0);
+
+    if (totalLines > 0) {
+      console.log('\n📈 Code Impact:');
+      console.log(`  Total lines changed: ${totalLines.toLocaleString()}`);
+      console.log(`  Total files modified: ${totalFiles}`);
+      console.log(`  Avg lines/task: ${Math.round(totalLines / completed.length)}`);
+    }
+  }
+
+  console.log('\n' + '='.repeat(60));
+}
+
+/**
+ * Get duration string from session.
+ */
+function getDuration(session: SessionState): string {
+  const start = new Date(session.startedAt).getTime();
+  const end = session.completedAt
+    ? new Date(session.completedAt).getTime()
+    : Date.now();
+  const durationMs = end - start;
+  const minutes = Math.floor(durationMs / 60000);
+  const seconds = Math.floor((durationMs % 60000) / 1000);
+  return `${minutes}m ${seconds}s`;
+}
+

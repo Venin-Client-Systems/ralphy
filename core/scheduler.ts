@@ -11,6 +11,7 @@
 import type { Task, Domain } from '../lib/types.js';
 import { areDomainsCompatible } from '../lib/domain-classifier.js';
 import { logger } from '../lib/logger.js';
+import { detectConflicts } from '../lib/conflict-detector.js';
 
 /**
  * A slot in the scheduler (represents a running task).
@@ -37,6 +38,8 @@ export interface SchedulerState {
   completed: number;
   /** Total tasks failed */
   failed: number;
+  /** Block reasons for queued tasks */
+  blockReasons: Map<number, string>;
 }
 
 /**
@@ -64,6 +67,7 @@ export function createScheduler(maxSlots: number): SchedulerState {
     scheduled: new Set(),
     completed: 0,
     failed: 0,
+    blockReasons: new Map(),
   };
 }
 
@@ -139,6 +143,20 @@ function findFreeSlot(state: SchedulerState): Slot | null {
 export function fillSlots(state: SchedulerState): Task[] {
   const scheduled: Task[] = [];
 
+  // Clear previous block reasons
+  state.blockReasons.clear();
+
+  // Detect file conflicts across ALL tasks (not just queue)
+  const allTasks = [
+    ...state.slots.filter(s => s.task !== null).map(s => s.task!),
+    ...state.queue
+  ];
+  const conflicts = detectConflicts(allTasks);
+
+  const runningIssues = new Set(
+    state.slots.filter(s => s.task !== null).map(s => s.task!.issueNumber)
+  );
+
   while (true) {
     // Find a free slot
     const slot = findFreeSlot(state);
@@ -147,29 +165,62 @@ export function fillSlots(state: SchedulerState): Task[] {
       break;
     }
 
-    // Find next compatible task
-    const next = findNextCompatibleTask(state);
-    if (!next) {
-      logger.debug('No compatible tasks in queue', { queueLength: state.queue.length });
+    // Find next compatible task (considering file conflicts)
+    let foundTask = false;
+    for (let i = 0; i < state.queue.length; i++) {
+      const task = state.queue[i];
+
+      // Check domain compatibility
+      if (!isTaskCompatible(state, task)) {
+        const runningDomains = state.slots
+          .filter(s => s.task !== null)
+          .map(s => s.task!.domain)
+          .join(', ');
+        state.blockReasons.set(
+          task.issueNumber,
+          `Domain conflict: ${task.domain} cannot run with currently executing domains [${runningDomains}]`
+        );
+        continue;
+      }
+
+      // Check file conflicts
+      const taskConflicts = conflicts.get(task.issueNumber) || [];
+      const hasFileConflict = taskConflicts.some(c => runningIssues.has(c));
+      if (hasFileConflict) {
+        const conflictingIssues = taskConflicts.filter(c => runningIssues.has(c)).join(', ');
+        state.blockReasons.set(
+          task.issueNumber,
+          `File conflict: shares files with tasks [#${conflictingIssues}]`
+        );
+        continue;
+      }
+
+      // Task is compatible - schedule it
+      const compatibleTask = state.queue.splice(i, 1)[0];
+
+      // Assign to slot
+      slot.task = compatibleTask;
+      slot.startedAt = new Date();
+      state.scheduled.add(compatibleTask.issueNumber);
+      runningIssues.add(compatibleTask.issueNumber);
+
+      scheduled.push(compatibleTask);
+
+      logger.info('Task scheduled', {
+        issueNumber: compatibleTask.issueNumber,
+        domain: compatibleTask.domain,
+        slot: slot.index,
+        queueRemaining: state.queue.length,
+      });
+
+      foundTask = true;
       break;
     }
 
-    // Remove task from queue
-    const task = state.queue.splice(next.queueIndex, 1)[0];
-
-    // Assign to slot
-    slot.task = task;
-    slot.startedAt = new Date();
-    state.scheduled.add(task.issueNumber);
-
-    scheduled.push(task);
-
-    logger.info('Task scheduled', {
-      issueNumber: task.issueNumber,
-      domain: task.domain,
-      slot: slot.index,
-      queueRemaining: state.queue.length,
-    });
+    if (!foundTask) {
+      logger.debug('No compatible tasks in queue', { queueLength: state.queue.length });
+      break;
+    }
   }
 
   return scheduled;
