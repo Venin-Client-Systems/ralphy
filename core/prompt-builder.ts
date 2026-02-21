@@ -15,7 +15,10 @@ ${task.body}
 Instructions:
 1. Implement this task completely
 2. Write tests if appropriate
-3. Commit your changes with a descriptive message
+3. IMPORTANT: You MUST commit changes - either:
+   - Code changes implementing the task, OR
+   - If this is analysis/audit work with no code changes needed:
+     Create a file named ANALYSIS-${task.issueNumber}.md with your findings
 4. IMPORTANT: You MUST use tools to read and edit files in this repo
 
 SCOPE RULES (MANDATORY):
@@ -39,11 +42,14 @@ CRITICAL REQUIREMENTS:
 1. Read the issue body carefully and implement ALL requested changes
 2. Make the necessary code changes to fix/implement the issue
 3. Test your changes to ensure they work
-4. Commit your work with a clear commit message
-5. Push the branch so a PR can be created
+4. IMPORTANT: You MUST commit changes. If this is an analysis/audit task where no code changes are needed:
+   - Create a file named ANALYSIS-${task.issueNumber}.md in the root directory
+   - Document your findings, recommendations, or explanation of why no changes are needed
+   - Commit this file so there is a record of your work
+5. Stay focused on the issue scope. Avoid unrelated changes.
 
-You MUST create commits. Do not just analyze - actually implement the solution and commit it.
-Stay focused on the issue scope. Avoid unrelated changes.`;
+You MUST create commits - either code changes OR an analysis report file.
+DO NOT complete a task with zero commits.`;
 }
 
 /**
