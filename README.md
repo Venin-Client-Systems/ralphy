@@ -663,7 +663,7 @@ Built by [Venin Client Systems](https://github.com/Venin-Client-Systems) with:
 
 - **GitHub Issues**: [Report bugs or request features](https://github.com/Venin-Client-Systems/autoissue/issues)
 - **Discussions**: [Ask questions](https://github.com/Venin-Client-Systems/autoissue/discussions)
-- **Email**: support@veninclientsystems.com
+- **Email**: support@venin.space
 
 ---
 
