@@ -930,8 +930,11 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
 
         logger.info('Changes committed', { issueNumber: task.issueNumber });
       } else {
-        logger.warn('No changes to commit', { issueNumber: task.issueNumber });
-        throw new Error('Agent completed but made no changes to commit');
+        logger.error('No changes to commit - agent failed to implement solution or create analysis report', {
+          issueNumber: task.issueNumber,
+          hint: 'Agent should either make code changes OR create an ANALYSIS-*.md file'
+        });
+        throw new Error('Agent completed but made no changes to commit. Expected code changes or an analysis report file.');
       }
     } catch (err) {
       logger.error('Failed to commit changes', {
