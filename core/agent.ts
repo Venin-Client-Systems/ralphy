@@ -220,7 +220,10 @@ export async function spawnAgent(
       validatePrompt(prompt, 'prompt');
       validateModel(opts.model);
       validateBudget(opts.maxBudgetUsd);
-      validatePrompt(opts.systemPrompt, 'systemPrompt');
+      // Only validate system prompt if it's not empty (allows combining into user prompt)
+      if (opts.systemPrompt && opts.systemPrompt.trim()) {
+        validatePrompt(opts.systemPrompt, 'systemPrompt');
+      }
 
       if (opts.timeoutMs !== undefined) {
         validateTimeout(opts.timeoutMs);
