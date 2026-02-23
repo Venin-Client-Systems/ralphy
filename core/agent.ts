@@ -220,10 +220,7 @@ export async function spawnAgent(
       validatePrompt(prompt, 'prompt');
       validateModel(opts.model);
       validateBudget(opts.maxBudgetUsd);
-      // Only validate system prompt if it's not empty (allows combining into user prompt)
-      if (opts.systemPrompt && opts.systemPrompt.trim()) {
-        validatePrompt(opts.systemPrompt, 'systemPrompt');
-      }
+      validatePrompt(opts.systemPrompt, 'systemPrompt');
 
       if (opts.timeoutMs !== undefined) {
         validateTimeout(opts.timeoutMs);
@@ -240,12 +237,8 @@ export async function spawnAgent(
         '--output-format', 'json',
         '--model', opts.model,
         '--max-turns', String(maxTurns),
+        '--append-system-prompt', opts.systemPrompt,
       ];
-
-      // Only add system prompt if not empty
-      if (opts.systemPrompt && opts.systemPrompt.trim()) {
-        args.push('--append-system-prompt', opts.systemPrompt);
-      }
 
       if (opts.maxBudgetUsd > 0) {
         args.push('--max-budget-usd', opts.maxBudgetUsd.toString());

@@ -854,14 +854,8 @@ async function executeTask(
       branch: worktree.branch,
     });
 
-    // Step 2: Build prompt for agent - combine system + user prompt
-    const systemInstructions = buildSystemPrompt(task);
-    const taskInstructions = buildTaskPrompt(task);
-    let currentPrompt = `${systemInstructions}
-
----
-
-${taskInstructions}`;
+    // Step 2: Build prompt for agent
+    let currentPrompt = buildTaskPrompt(task);
 
     // Step 2.5: Select optimal model based on task complexity
     const selectedModel = selectOptimalModel(task, config.agent);
@@ -881,7 +875,7 @@ ${taskInstructions}`;
         return await spawnAgent(currentPrompt, {
           model: selectedModel,
           maxBudgetUsd: config.agent.maxBudgetUsd,
-          systemPrompt: '', // Empty - everything is in user prompt now
+          systemPrompt: buildSystemPrompt(task),
           cwd: worktree.path,
           yolo: config.agent.yolo,
           maxTurns: config.agent.maxTurns,
