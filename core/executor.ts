@@ -904,22 +904,31 @@ async function executeTask(
     task.currentAction = 'Agent completed, committing changes...';
     if (!isHeadless) updateUI(session);
 
-    // Step 3.5: Commit agent's changes (required for PR creation)
+    // Step 3.5: Verify agent made changes (either committed or uncommitted)
     try {
       const { execFile } = await import('node:child_process');
       const { promisify } = await import('node:util');
       const execFileAsync = promisify(execFile);
 
-      // Check if there are changes to commit
+      // First check if agent already committed changes
+      const { stdout: logOutput } = await execFileAsync('git', ['log', '--oneline', '-1'], {
+        cwd: worktree.path,
+      });
+
+      const latestCommit = logOutput.trim();
+      const isAgentCommit = latestCommit && !latestCommit.includes('Initial commit');
+
+      // Check if there are uncommitted changes
       const { stdout: statusOutput } = await execFileAsync('git', ['status', '--porcelain'], {
         cwd: worktree.path,
       });
 
-      if (statusOutput.trim()) {
-        // Stage all changes
+      if (isAgentCommit) {
+        logger.info('Agent committed changes', { issueNumber, commit: latestCommit.substring(0, 50) });
+      } else if (statusOutput.trim()) {
+        // Agent didn't commit, so we commit for them
         await execFileAsync('git', ['add', '-A'], { cwd: worktree.path });
 
-        // Commit with descriptive message
         const commitMessage = `fix: ${task.title}
 
 Resolves #${issueNumber}
@@ -932,16 +941,16 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
           cwd: worktree.path,
         });
 
-        logger.info('Changes committed', { issueNumber });
+        logger.info('Changes committed by executor', { issueNumber });
       } else {
-        logger.error('No changes to commit - agent failed to implement solution or create analysis report', {
+        logger.error('No changes detected - agent failed to implement solution', {
           issueNumber,
-          hint: 'Agent should either make code changes OR create an ANALYSIS-*.md file'
+          hint: 'Agent should make code changes and commit them'
         });
-        throw new Error('Agent completed but made no changes to commit. Expected code changes or an analysis report file.');
+        throw new Error('Agent completed but made no changes. Expected code changes or commits.');
       }
     } catch (err) {
-      logger.error('Failed to commit changes', {
+      logger.error('Failed to verify/commit changes', {
         issueNumber,
         error: err instanceof Error ? err.message : String(err),
       });
