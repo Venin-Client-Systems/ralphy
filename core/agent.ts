@@ -249,6 +249,7 @@ export async function spawnAgent(
       }
 
       logger.debug('Spawning agent', { model: opts.model, maxTurns });
+      logger.info('Claude CLI command', { command: `claude ${args.join(' ')}`, cwd: opts.cwd });
       const stdout = await runClaude(args, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, opts.cwd);
       const output = parseOutput(stdout);
 

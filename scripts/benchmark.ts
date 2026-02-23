@@ -179,7 +179,8 @@ async function benchmarkConflictDetection() {
       body: 'Files: src/lib/auth.ts, src/lib/types.ts',
       labels: ['backend'],
       domain: 'backend',
-      dependencies: [],
+      status: 'pending',
+      metadata: { depends_on: [] },
     },
     {
       issueNumber: 2,
@@ -187,7 +188,8 @@ async function benchmarkConflictDetection() {
       body: 'Files: src/lib/cache.ts, src/lib/types.ts',
       labels: ['backend'],
       domain: 'backend',
-      dependencies: [],
+      status: 'pending',
+      metadata: { depends_on: [] },
     },
     {
       issueNumber: 3,
@@ -195,7 +197,8 @@ async function benchmarkConflictDetection() {
       body: 'Files: src/ui/dashboard.tsx',
       labels: ['frontend'],
       domain: 'frontend',
-      dependencies: [],
+      status: 'pending',
+      metadata: { depends_on: [] },
     },
     {
       issueNumber: 4,
@@ -203,7 +206,8 @@ async function benchmarkConflictDetection() {
       body: 'Files: src/core/executor.ts, src/lib/types.ts',
       labels: ['backend'],
       domain: 'backend',
-      dependencies: [],
+      status: 'pending',
+      metadata: { depends_on: [] },
     },
   ];
 
@@ -316,6 +320,7 @@ async function benchmarkErrorBoundaries() {
         async () => {
           return Promise.resolve({ success: true });
         },
+        'Benchmark Success',
         { observer }
       );
     },
@@ -329,7 +334,7 @@ async function benchmarkErrorBoundaries() {
   const baselineResult = await benchmark(
     'Baseline (No Error Boundary)',
     async () => {
-      return Promise.resolve({ success: true });
+      await Promise.resolve({ success: true });
     },
     100
   );

@@ -227,7 +227,7 @@ export interface GitHubIssue {
   body: string;
   labels: string[];
   state: 'open' | 'closed';
-  assignee?: string;
+  assignee?: string | null;
   created_at: string;
   updated_at: string;
   html_url: string;

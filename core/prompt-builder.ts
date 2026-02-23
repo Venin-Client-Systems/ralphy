@@ -3,7 +3,7 @@ import type { Task } from '../lib/types.js';
 /**
  * Build the user prompt for a task.
  *
- * This is the main instruction given to the agent about what to implement.
+ * Simple and direct - like working Ralphy.
  */
 export function buildTaskPrompt(task: Task): string {
   return `You are working on a specific task. Focus ONLY on this task:
@@ -12,17 +12,23 @@ TASK: #${task.issueNumber} - ${task.title}
 
 ${task.body}
 
-Instructions:
-1. Implement this task completely
-2. Write tests if appropriate
-3. Commit your changes with a descriptive message
-4. IMPORTANT: You MUST use tools to read and edit files in this repo
+Rules (you MUST follow these):
+- Keep changes focused and minimal. Do not refactor unrelated code.
+- One logical change per commit. If task is too large, break it into subtasks.
+- Write concise code. Avoid over-engineering.
+- Don't leave dead code. Delete unused code completely.
+- Quality over speed. Small steps compound into big progress.
 
-SCOPE RULES (MANDATORY):
-- ONLY modify files directly required by this task
-- Do NOT refactor, rename, delete, or 'clean up' code outside the task scope
-- Do NOT remove imports, files, or utilities used by other parts of the codebase
-- Other agents are working on other tasks in parallel. Their work must not be disrupted.
+Boundaries - Do NOT modify:
+- Files unrelated to this task
+- Other agents are working in parallel. Don't disrupt their work.
+
+Instructions:
+1. Implement this specific task completely
+2. Write tests if appropriate
+3. Run tests and ensure they pass
+4. Run linting if needed
+5. Commit your changes with a descriptive message
 
 Focus only on implementing: ${task.title}`;
 }
@@ -30,29 +36,17 @@ Focus only on implementing: ${task.title}`;
 /**
  * Build the system prompt for the agent.
  *
- * This sets the overall context and critical requirements.
+ * Keep it simple - no massive directives.
  */
 export function buildSystemPrompt(task: Task): string {
-  return `You are a software engineer tasked with implementing issue #${task.issueNumber}.
-
-CRITICAL REQUIREMENTS:
-1. Read the issue body carefully and implement ALL requested changes
-2. Make the necessary code changes to fix/implement the issue
-3. Test your changes to ensure they work
-4. Commit your work with a clear commit message
-5. Push the branch so a PR can be created
-
-You MUST create commits. Do not just analyze - actually implement the solution and commit it.
-Stay focused on the issue scope. Avoid unrelated changes.`;
+  return `You are a software engineer implementing issue #${task.issueNumber}. Use your tools (Read, Edit, Write, Bash) to make the required code changes.`;
 }
 
 /**
  * Build a prompt for planner mode.
- *
- * This asks the agent to decompose a high-level directive into specific issues.
  */
 export function buildPlannerPrompt(directive: string, repo: string): string {
-  return `You are a technical project planner. Your job is to break down a high-level directive into actionable GitHub issues.
+  return `You are a technical project planner. Break down this directive into actionable GitHub issues.
 
 DIRECTIVE:
 ${directive}
@@ -78,7 +72,7 @@ Provide a JSON array of issues following this schema:
     "labels": ["feature", "backend"],
     "metadata": {
       "complexity": "simple" | "medium" | "complex",
-      "depends_on": [issue_number] // Optional, if depends on another task
+      "depends_on": [issue_number] // Optional
     }
   }
 ]
@@ -86,7 +80,7 @@ Provide a JSON array of issues following this schema:
 
 Guidelines:
 - Keep tasks focused and independent when possible
-- If tasks have dependencies, make them explicit in metadata.depends_on
+- Make dependencies explicit in metadata.depends_on
 - Classify complexity realistically (simple=<1h, medium=1-4h, complex=>4h)
 - Add appropriate domain labels for parallel scheduling
 - Be specific about acceptance criteria in the body`;

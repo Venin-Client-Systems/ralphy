@@ -129,7 +129,7 @@ export async function updatePullRequest(
   try {
     // Add comment with additional info instead of updating PR body
     // (simpler and doesn't require fetching current body)
-    await githubApi.createComment(prNumber, repo, additionalInfo);
+    await githubApi.createComment(repo, prNumber, additionalInfo);
 
     logger.info('PR updated with comment via Octokit', { prNumber });
   } catch (err) {

@@ -815,6 +815,10 @@ async function executeTask(
   isHeadless: boolean,
   stopDashboard?: (() => void) | null
 ): Promise<void> {
+  // CRITICAL FIX: Capture issueNumber immediately to prevent closure bugs
+  // in concurrent execution where task objects might get swapped
+  const issueNumber = task.issueNumber;
+
   const startTime = Date.now();
   task.status = 'running';
   task.startedAt = new Date();
@@ -825,7 +829,7 @@ async function executeTask(
     broadcastUpdate(session);
   }
 
-  logger.info('Task started', { issueNumber: task.issueNumber });
+  logger.info('Task started', { issueNumber });
 
   let worktreeCleanup: (() => Promise<void>) | null = null;
 
@@ -834,7 +838,7 @@ async function executeTask(
     task.currentAction = 'Creating worktree...';
     if (!isHeadless) updateUI(session);
 
-    const branchName = `autoissue/issue-${task.issueNumber}`;
+    const branchName = `autoissue/issue-${issueNumber}`;
     const { worktree, cleanup } = await createWorktree(branchName, {
       baseBranch: config.project.baseBranch,
       prefix: 'autoissue-',
@@ -845,7 +849,7 @@ async function executeTask(
     task.worktreePath = worktree.path;
 
     logger.info('Worktree created', {
-      issueNumber: task.issueNumber,
+      issueNumber,
       path: worktree.path,
       branch: worktree.branch,
     });
@@ -856,7 +860,7 @@ async function executeTask(
     // Step 2.5: Select optimal model based on task complexity
     const selectedModel = selectOptimalModel(task, config.agent);
     logger.info('Model selected', {
-      issueNumber: task.issueNumber,
+      issueNumber,
       model: selectedModel,
       configuredModel: config.agent.model,
     });
@@ -878,7 +882,7 @@ async function executeTask(
           timeoutMs: config.executor.timeoutMinutes * 60 * 1000,
         });
       },
-      `Task #${task.issueNumber} (${selectedModel})`,
+      `Task #${issueNumber} (${selectedModel})`,
       {
         maxRetries: 2,
         observer: FeatureFlags.ENABLE_METRICS ? errorObserver : undefined,
@@ -887,7 +891,7 @@ async function executeTask(
     );
 
     logger.info('Agent completed', {
-      issueNumber: task.issueNumber,
+      issueNumber,
       sessionId: response.sessionId,
       cost: response.costUsd,
       duration: response.durationMs,
@@ -900,25 +904,34 @@ async function executeTask(
     task.currentAction = 'Agent completed, committing changes...';
     if (!isHeadless) updateUI(session);
 
-    // Step 3.5: Commit agent's changes (required for PR creation)
+    // Step 3.5: Verify agent made changes (either committed or uncommitted)
     try {
       const { execFile } = await import('node:child_process');
       const { promisify } = await import('node:util');
       const execFileAsync = promisify(execFile);
 
-      // Check if there are changes to commit
+      // First check if agent already committed changes
+      const { stdout: logOutput } = await execFileAsync('git', ['log', '--oneline', '-1'], {
+        cwd: worktree.path,
+      });
+
+      const latestCommit = logOutput.trim();
+      const isAgentCommit = latestCommit && !latestCommit.includes('Initial commit');
+
+      // Check if there are uncommitted changes
       const { stdout: statusOutput } = await execFileAsync('git', ['status', '--porcelain'], {
         cwd: worktree.path,
       });
 
-      if (statusOutput.trim()) {
-        // Stage all changes
+      if (isAgentCommit) {
+        logger.info('Agent committed changes', { issueNumber, commit: latestCommit.substring(0, 50) });
+      } else if (statusOutput.trim()) {
+        // Agent didn't commit, so we commit for them
         await execFileAsync('git', ['add', '-A'], { cwd: worktree.path });
 
-        // Commit with descriptive message
         const commitMessage = `fix: ${task.title}
 
-Resolves #${task.issueNumber}
+Resolves #${issueNumber}
 
 ${task.body.split('\n').slice(0, 3).join('\n')}
 
@@ -928,14 +941,17 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
           cwd: worktree.path,
         });
 
-        logger.info('Changes committed', { issueNumber: task.issueNumber });
+        logger.info('Changes committed by executor', { issueNumber });
       } else {
-        logger.warn('No changes to commit', { issueNumber: task.issueNumber });
-        throw new Error('Agent completed but made no changes to commit');
+        logger.error('No changes detected - agent failed to implement solution', {
+          issueNumber,
+          hint: 'Agent should make code changes and commit them'
+        });
+        throw new Error('Agent completed but made no changes. Expected code changes or commits.');
       }
     } catch (err) {
-      logger.error('Failed to commit changes', {
-        issueNumber: task.issueNumber,
+      logger.error('Failed to verify/commit changes', {
+        issueNumber,
         error: err instanceof Error ? err.message : String(err),
       });
       throw err;
@@ -955,24 +971,24 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
       };
 
       logger.info('Task metrics', {
-        issueNumber: task.issueNumber,
+        issueNumber,
         ...metrics
       });
     } catch (err) {
-      logger.warn('Failed to gather metrics', { issueNumber: task.issueNumber });
+      logger.warn('Failed to gather metrics', { issueNumber });
     }
 
     // Step 5: Create PR (if configured)
     if (config.executor.createPr) {
       const prNumber = await createPR(task, worktree.branch, config, worktree.path);
       task.prNumber = prNumber;
-      logger.info('PR created', { issueNumber: task.issueNumber, prNumber });
+      logger.info('PR created', { issueNumber, prNumber });
     }
 
     // Mark as completed
     task.status = 'completed';
     task.completedAt = new Date();
-    completeTask(scheduler, task.issueNumber, true);
+    completeTask(scheduler, issueNumber, true);
 
     // Broadcast status update
     if (stopDashboard) {
@@ -988,19 +1004,19 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
     await saveState(session);
 
     logger.info('Task completed successfully', {
-      issueNumber: task.issueNumber,
+      issueNumber,
       duration: Date.now() - startTime,
     });
   } catch (err) {
     logger.error('Task failed', {
-      issueNumber: task.issueNumber,
+      issueNumber,
       error: err instanceof Error ? err.message : String(err),
     });
 
     task.status = 'failed';
     task.error = err instanceof Error ? err.message : String(err);
     task.completedAt = new Date();
-    completeTask(scheduler, task.issueNumber, false);
+    completeTask(scheduler, issueNumber, false);
 
     // Broadcast status update
     if (stopDashboard) {
@@ -1019,10 +1035,10 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
     if (worktreeCleanup) {
       try {
         await worktreeCleanup();
-        logger.debug('Worktree cleaned up', { issueNumber: task.issueNumber });
+        logger.debug('Worktree cleaned up', { issueNumber });
       } catch (err) {
         logger.warn('Worktree cleanup failed', {
-          issueNumber: task.issueNumber,
+          issueNumber,
           error: err instanceof Error ? err.message : String(err),
         });
       }

@@ -13,7 +13,7 @@ import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { logger } from '../lib/logger.js';
-import { WorktreeError } from '../lib/types.js';
+import { WorktreeError, ErrorCode } from '../lib/types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -84,11 +84,11 @@ export async function createWorktree(
 
   // Validate inputs
   if (!branch || branch.trim().length === 0) {
-    throw new WorktreeError('Branch name cannot be empty');
+    throw new WorktreeError('Branch name cannot be empty', ErrorCode.WORKTREE_CREATE_FAILED);
   }
 
   if (branch.includes(' ') || branch.includes('\n')) {
-    throw new WorktreeError('Branch name cannot contain whitespace');
+    throw new WorktreeError('Branch name cannot contain whitespace', ErrorCode.WORKTREE_CREATE_FAILED);
   }
 
   const worktreeName = `${prefix}${branch.replace(/[^a-zA-Z0-9-]/g, '-')}`;
@@ -102,7 +102,7 @@ export async function createWorktree(
       logger.warn('Worktree exists, removing', { worktreePath });
       await cleanupWorktree(worktreePath);
     } else {
-      throw new WorktreeError(`Worktree already exists: ${worktreePath}`, worktreePath);
+      throw new WorktreeError(`Worktree already exists: ${worktreePath}`, ErrorCode.WORKTREE_BRANCH_EXISTS, worktreePath);
     }
   }
 
@@ -153,6 +153,7 @@ export async function createWorktree(
 
     throw new WorktreeError(
       `Failed to create worktree: ${err instanceof Error ? err.message : String(err)}`,
+      ErrorCode.WORKTREE_CREATE_FAILED,
       worktreePath
     );
   }
@@ -182,6 +183,7 @@ export async function cleanupWorktree(worktreePath: string): Promise<void> {
     });
     throw new WorktreeError(
       `Failed to remove worktree: ${err instanceof Error ? err.message : String(err)}`,
+      ErrorCode.WORKTREE_CLEANUP_FAILED,
       worktreePath
     );
   }
@@ -199,7 +201,8 @@ export async function listWorktrees(): Promise<Worktree[]> {
       error: err instanceof Error ? err.message : String(err),
     });
     throw new WorktreeError(
-      `Failed to list worktrees: ${err instanceof Error ? err.message : String(err)}`
+      `Failed to list worktrees: ${err instanceof Error ? err.message : String(err)}`,
+      ErrorCode.WORKTREE_CREATE_FAILED
     );
   }
 }
@@ -270,7 +273,8 @@ export async function pruneWorktrees(): Promise<void> {
       error: err instanceof Error ? err.message : String(err),
     });
     throw new WorktreeError(
-      `Failed to prune worktrees: ${err instanceof Error ? err.message : String(err)}`
+      `Failed to prune worktrees: ${err instanceof Error ? err.message : String(err)}`,
+      ErrorCode.WORKTREE_CLEANUP_FAILED
     );
   }
 }
