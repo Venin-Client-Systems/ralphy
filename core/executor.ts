@@ -49,6 +49,10 @@ import { DependencyGraph } from '../lib/dependency-graph.js';
 import { startDashboardServer, broadcastUpdate } from '../server/dashboard.js';
 import { homedir } from 'os';
 import { join } from 'path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Shared circuit breaker for agent operations.
@@ -978,11 +982,53 @@ Co-authored-by: Claude AI <noreply@anthropic.com>`;
       logger.warn('Failed to gather metrics', { issueNumber });
     }
 
-    // Step 5: Create PR (if configured)
-    if (config.executor.createPr) {
-      const prNumber = await createPR(task, worktree.branch, config, worktree.path);
-      task.prNumber = prNumber;
-      logger.info('PR created', { issueNumber, prNumber });
+    // Step 5: Merge to current branch and close issue (Ralphy-style workflow)
+    try {
+      // Get the current branch name
+      const { stdout: currentBranch } = await execFileAsync('git', ['branch', '--show-current'], {
+        cwd: config.project.path,
+      });
+      const targetBranch = currentBranch.trim();
+
+      logger.info('Merging worktree branch to current branch', {
+        issueNumber,
+        worktreeBranch: worktree.branch,
+        targetBranch,
+      });
+
+      // Merge the worktree branch into the current branch
+      await execFileAsync('git', ['merge', '--no-ff', worktree.branch, '-m', `Merge autoissue/${issueNumber}: ${task.title}`], {
+        cwd: config.project.path,
+      });
+
+      logger.info('Merged successfully', { issueNumber, targetBranch });
+
+      // Push the current branch
+      await execFileAsync('git', ['push', 'origin', targetBranch], {
+        cwd: config.project.path,
+      });
+
+      logger.info('Pushed to remote', { issueNumber, targetBranch });
+
+      // Close the issue via GitHub API
+      const { Octokit } = await import('@octokit/rest');
+      const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+      const [owner, repo] = config.project.repo.split('/');
+
+      await octokit.issues.update({
+        owner,
+        repo,
+        issue_number: issueNumber,
+        state: 'closed',
+      });
+
+      logger.info('Issue closed', { issueNumber });
+    } catch (err) {
+      logger.error('Failed to merge and close issue', {
+        issueNumber,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
     }
 
     // Mark as completed

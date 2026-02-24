@@ -167,25 +167,58 @@ export async function createWorktree(
 export async function cleanupWorktree(worktreePath: string): Promise<void> {
   logger.debug('Cleaning up worktree', { worktreePath });
 
-  if (!existsSync(worktreePath)) {
-    logger.debug('Worktree does not exist, nothing to clean', { worktreePath });
+  // First, check if git recognizes this as a worktree
+  let isGitWorktree = false;
+  try {
+    const worktrees = await listWorktrees();
+    isGitWorktree = worktrees.some((w) => w.path === worktreePath);
+  } catch (err) {
+    logger.warn('Failed to list worktrees during cleanup', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // If git doesn't recognize it but the path exists, prune stale references
+  if (!isGitWorktree && existsSync(worktreePath)) {
+    logger.debug('Worktree path exists but not in git worktree list, pruning stale references', { worktreePath });
+    try {
+      await pruneWorktrees();
+      // Check again after pruning
+      const worktreesAfterPrune = await listWorktrees();
+      isGitWorktree = worktreesAfterPrune.some((w) => w.path === worktreePath);
+    } catch (err) {
+      logger.warn('Failed to prune worktrees', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // If git doesn't recognize it and path doesn't exist, nothing to do
+  if (!isGitWorktree && !existsSync(worktreePath)) {
+    logger.debug('Worktree does not exist in git or filesystem, nothing to clean', { worktreePath });
     return;
   }
 
-  try {
-    // Remove the worktree
-    await execFileAsync('git', ['worktree', 'remove', worktreePath, '--force'], { encoding: 'utf-8' });
-    logger.info('Worktree removed', { worktreePath });
-  } catch (err) {
-    logger.error('Failed to remove worktree', {
-      worktreePath,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw new WorktreeError(
-      `Failed to remove worktree: ${err instanceof Error ? err.message : String(err)}`,
-      ErrorCode.WORKTREE_CLEANUP_FAILED,
-      worktreePath
-    );
+  // If git recognizes it, remove it properly
+  if (isGitWorktree) {
+    try {
+      await execFileAsync('git', ['worktree', 'remove', worktreePath, '--force'], { encoding: 'utf-8' });
+      logger.info('Worktree removed', { worktreePath });
+    } catch (err) {
+      logger.error('Failed to remove worktree', {
+        worktreePath,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw new WorktreeError(
+        `Failed to remove worktree: ${err instanceof Error ? err.message : String(err)}`,
+        ErrorCode.WORKTREE_CLEANUP_FAILED,
+        worktreePath
+      );
+    }
+  } else {
+    // Path exists but git doesn't recognize it - just log a warning
+    // The worktree was already removed from git's tracking, so consider it cleaned
+    logger.warn('Worktree path exists but not tracked by git, considering it cleaned', { worktreePath });
   }
 }
 
